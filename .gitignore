@@ -1,0 +1,6 @@
+# lead data and generated imports never go in this public repository
+out/
+*.xlsx
+*.pdf
+node_modules
+shots/
