@@ -42,11 +42,13 @@ Deno.serve(async (req) => {
   try {
     // ---- one-time first manager setup (only while no active manager exists)
     if (action === 'bootstrap') {
-      if (!SETUP_CODE) return fail('Setup is not enabled.', 403);
       if ((await activeManagers()) > 0) return fail('Setup is already done. Ask a manager for an invite.', 403);
-      if (String(body.setup_code || '').trim() !== SETUP_CODE) return fail('That setup code is not right.', 403);
       const email = String(body.email || '').trim().toLowerCase(), name = String(body.full_name || '').trim();
       if (!EMAIL.test(email) || !name || !base) return fail('Enter your name and email.');
+      // one-time code: stored hashed in the database (or optionally the SETUP_CODE env var); used up on success
+      const code = String(body.setup_code || '').trim();
+      const ok = (SETUP_CODE && code === SETUP_CODE) || (!!code && (await admin.rpc('use_setup_code', { p_code: code })).data === true);
+      if (!ok) return fail('That setup code is not right or was already used.', 403);
       const { data: existing } = await admin.from('profiles').select('id').eq('email', email).maybeSingle();
       const r = existing ? await makeLink(email, 'recovery', base) : await makeLink(email, 'invite', base, name);
       await admin.from('profiles').upsert({ id: r.user.id, email, full_name: name, role: 'manager', active: true, invited_at: new Date().toISOString() });

@@ -207,7 +207,12 @@ async function retryFailed() {
 
 async function authorize(req: Request): Promise<{ ok: boolean; user: string | null; why?: string }> {
   const secret = req.headers.get('x-cron-secret');
-  if (CRON_SECRET && secret && secret === CRON_SECRET) return { ok: true, user: null };
+  if (secret) {
+    // the scheduler's secret lives in the database vault (or optionally in the CRON_SECRET env var)
+    if (CRON_SECRET && secret === CRON_SECRET) return { ok: true, user: null };
+    const { data } = await db.rpc('check_cron_secret', { p_secret: secret });
+    return data === true ? { ok: true, user: null } : { ok: false, user: null, why: 'Scheduler secret not accepted.' };
+  }
   const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (!token) return { ok: false, user: null, why: 'Sign in as a manager to run a refresh.' };
   const { data: { user } } = await db.auth.getUser(token);

@@ -1,9 +1,7 @@
-// Copy to config.js and fill in. Both values are public by design: the publishable key only
-// identifies the project; every read and write is checked in the database against the signed-in user.
-// Never put the service role (secret) key here.
+// Public by design: the project address and its public (anon) key only identify the project.
+// Every read and write is checked in the database against the signed-in user. The secret service key is never here.
 window.SPEEDY_CONFIG = {
-  supabaseUrl: 'https://YOUR-PROJECT-REF.supabase.co',
-  supabaseKey: 'sb_publishable_xxx',
-  // true only after custom SMTP is set up in Supabase; otherwise "Forgot password" tells people to ask a manager
+  supabaseUrl: 'https://anrbdczpcrjgdrkkvyay.supabase.co',
+  supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFucmJkY3pwY3JqZ2Rya2t2eWF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQwODAyMjgsImV4cCI6MjEwOTY1NjIyOH0.A8doJOWu_yu99KIA8SnEEibe4Y8IditY1vE_TyYgJ0Q',
   selfServiceReset: false,
 };

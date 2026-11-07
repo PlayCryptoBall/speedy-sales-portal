@@ -18,8 +18,8 @@ Security model: the browser holds only the project URL and the publishable key (
 ## Setup (one time)
 
 1. **Supabase**: create the organization and a project (Free plan is enough to start). Region `us-east-1`.
-2. **Database**: run `supabase/migrations/001` to `005` in order, then the generated legacy import (kept outside the repo), then `006_schedules.sql` with its two placeholders filled in.
-3. **Edge functions**: deploy `admin-users` and `refresh` (both with JWT verification off; they check callers themselves). Secrets: `CRON_SECRET` (same value as in 006), `SETUP_CODE` (one-time code for the first manager), optional `SAM_API_KEY`.
+2. **Database**: run `supabase/migrations/001` to `005`, then the generated legacy import (kept outside the repo), then `007_secrets.sql`, then `006_schedules.sql` with the functions URL filled in.
+3. **Edge functions**: deploy `admin-users` and `refresh` (both with JWT verification off; they check callers themselves). The scheduler secret and first-manager setup code live in the database, so no function secrets are required. Optional: `SAM_API_KEY`.
 4. **Auth settings** (Supabase dashboard, Authentication): turn off "Allow new users to sign up". Optional: raise "Email OTP expiration" so invite links last longer than 1 hour (max 24 h).
 5. **Web**: put the project URL and publishable key in `web/config.js`. GitHub: Settings, Pages, Source "GitHub Actions". The workflow in `.github/workflows/pages.yml` publishes `web/`.
 6. **First manager**: open `<portal>#/setup`, enter the setup code, name and email, then set a password. After that, setup is closed and everyone else is invited from People and access.

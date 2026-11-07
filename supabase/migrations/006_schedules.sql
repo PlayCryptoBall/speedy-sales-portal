@@ -1,12 +1,12 @@
 -- Speedy Sales Portal: server-side schedules (Supabase only; not part of the local test database).
--- Before running: replace __FUNCTIONS_URL__ with https://<project-ref>.supabase.co/functions/v1
--- and __CRON_SECRET__ with the same random value saved as the CRON_SECRET edge function secret.
+-- Before running: replace __FUNCTIONS_URL__ with https://<project-ref>.supabase.co/functions/v1.
+-- The scheduler secret is generated inside the database and checked by public.check_cron_secret (007).
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
 insert into private.app_config (key, value) values ('functions_url', '__FUNCTIONS_URL__')
 on conflict (key) do update set value = excluded.value;
-select vault.create_secret('__CRON_SECRET__', 'speedy_cron_secret', 'Shared secret the scheduler sends to the refresh function');
+select vault.create_secret(encode(extensions.gen_random_bytes(32), 'hex'), 'speedy_cron_secret', 'Shared secret the scheduler sends to the refresh function');
 
 create or replace function private.call_refresh(p_source text) returns bigint
 language sql security definer set search_path = '' as $$
