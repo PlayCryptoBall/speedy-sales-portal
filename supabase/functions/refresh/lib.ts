@@ -190,7 +190,10 @@ export function samFacts(notices: SamNotice[], details?: any) {
   const award = notices.find(n => n.type === 'Award Notice' && n.awardee);
   const solNotice = notices.find(n => /solicitation/i.test(n.type) && !/pre/i.test(n.type));
   const anyCanceled = notices.some(n => n.canceled) && latest.canceled;
-  const deadline = (solNotice || notices.find(n => n.deadline))?.deadline || null;
+  // newest dated notice wins: amendments that extend a deadline are often posted as Special Notices.
+  // Once a solicitation exists, pre-solicitation and sources-sought response dates no longer count.
+  const dated = notices.filter(n => n.deadline && !(solNotice && /presolicitation|sources sought/i.test(n.type)));
+  const deadline = dated[0]?.deadline || null;
   let stage = 'upcoming';
   if (anyCanceled) stage = 'cancelled';
   else if (award) stage = 'awarded';

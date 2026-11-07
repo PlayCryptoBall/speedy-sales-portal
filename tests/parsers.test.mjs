@@ -67,6 +67,13 @@ await t('SAM.gov tracked solicitation with closed bids and no award stays "bid c
   assert.equal(p.alt_keys.length, 4); assert.equal(p.solicitation_no, 'W9127826RA025');
 });
 
+await t('SAM.gov deadline extension posted as a Special Notice amendment wins over the original date', () => {
+  const list = JSON.parse(fx('sam_sgs_amended_deadline.json'))._embedded.results.map(L.normalizeSgs);
+  const notices = [...L.groupNotices(list).values()][0];
+  const f = L.samFacts(notices, null);
+  assert.equal(f.deadline, '2026-11-16T15:30:00-05:00');
+});
+
 // ---------------------------------------------------------------- through the database
 const DB = process.argv[2];
 if (DB) {
