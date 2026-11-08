@@ -2,26 +2,31 @@
 (function () {
   const { esc } = P;
   const root = () => document.getElementById('root');
-  const authCard = (inner) => `<div class="auth"><div class="card"><div class="mark"><i></i><div><b>Speedy Sales Portal</b><span class="small muted">Speedy Concrete Cutting, Orlando team</span></div></div>${inner}</div></div>`;
+  const authCard = (inner) => `<div class="auth">
+      <div class="auth-brand"><img src="assets/logo-dark.png" alt="Speedy Concrete Cutting, Inc.">
+        <div><h2>The Florida sales pipeline for the Orlando team.</h2><p>Claim leads, log every call, and keep follow-ups and bid deadlines in one place.</p></div>
+        <div class="since">Speedy Concrete Cutting · Since 1988</div></div>
+      <main class="auth-main"><div class="auth-card"><img class="mlogo" src="assets/logo.png" alt="Speedy Concrete Cutting, Inc.">${inner}</div></main></div>`;
 
   function signInScreen(msg) {
     document.title = 'Sign in · Speedy Sales';
     root().innerHTML = authCard(`
-      <h2 style="margin-bottom:12px">Sign in</h2>
+      <h1>Sign in</h1><p class="lede">Speedy Sales Portal</p>
       ${msg ? `<div class="alert ${msg.kind || 'info'}">${esc(msg.text)}</div>` : ''}
-      <form id="si">
+      <form id="si" novalidate>
         <label class="field"><span>Email</span><input type="email" name="email" autocomplete="username" required></label>
         <label class="field"><span>Password</span><input type="password" name="password" autocomplete="current-password" required></label>
         <div class="alert error hidden" role="alert" id="si_err"></div>
         <button class="btn primary block" type="submit">Sign in</button>
       </form>
-      <p class="small" style="margin-top:14px">${P.cfg.selfServiceReset ? '<button class="linkbtn" data-act="forgot">Forgot your password?</button>' : 'Forgot your password? Ask your manager for a reset link. They can send one from People and access.'}</p>
-      <p class="small muted">New here? Your manager sends you a one-time link to set your password.</p>`);
+      <div class="foot">${P.cfg.selfServiceReset ? '<button class="linkbtn" data-act="forgot">Forgot your password?</button>' : 'Forgot your password? Ask your manager for a reset link.'}<br>New here? Your manager sends you a one-time link to set your password.</div>`);
     document.getElementById('si').onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(e.target), btn = e.target.querySelector('button'), err = document.getElementById('si_err');
-      btn.disabled = true; btn.textContent = 'Signing in…'; err.classList.add('hidden');
-      const { error } = await P.sb.auth.signInWithPassword({ email: String(f.get('email')).trim(), password: String(f.get('password')) });
+      const email = String(f.get('email')).trim(), password = String(f.get('password'));
+      if (!email || !password) { err.textContent = 'Enter your email and password.'; err.classList.remove('hidden'); return; }
+      btn.disabled = true; btn.innerHTML = '<span class="spin" aria-hidden="true"></span>Signing in…'; err.classList.add('hidden');
+      const { error } = await P.sb.auth.signInWithPassword({ email, password });
       if (error) {
         err.textContent = /invalid login/i.test(error.message) ? 'Email or password is wrong.' : /banned/i.test(error.message) ? 'This account is turned off. Ask your manager.' : P.friendly(error);
         err.classList.remove('hidden'); btn.disabled = false; btn.textContent = 'Sign in'; return;
@@ -41,20 +46,20 @@
     document.title = 'Set your password · Speedy Sales';
     const type = params.type === 'recovery' ? 'recovery' : 'invite';
     if (params.token_hash) {
-      root().innerHTML = authCard('<p>Checking your link…</p>');
+      root().innerHTML = authCard('<h1>Checking your link…</h1>');
       const { error } = await P.sb.auth.verifyOtp({ token_hash: params.token_hash, type });
       history.replaceState(null, '', location.pathname + '#/welcome?type=' + type + '&checked=1');
       if (error) {
-        root().innerHTML = authCard(`<h2>This link no longer works</h2><p>Links work once and expire after a short time. Ask your manager for a new one from People and access.</p><a class="btn" href="#/">Go to sign in</a>`);
+        root().innerHTML = authCard(`<h1>This link no longer works</h1><p class="lede">Links work once and expire after a short time. Ask your manager for a new one.</p><a class="btn" href="#/">Go to sign in</a>`);
         return;
       }
     }
     const { data: { session } } = await P.sb.auth.getSession();
     if (!session) { signInScreen({ text: 'Open the newest link your manager sent you to set a password.', kind: 'warn' }); return; }
     root().innerHTML = authCard(`
-      <h2>${type === 'invite' ? 'Welcome. Choose a password' : 'Choose a new password'}</h2>
-      <p class="small muted">For ${esc(session.user.email)}. Use at least 10 characters; a short phrase is easiest to remember.</p>
-      <form id="pw">
+      <h1>${type === 'invite' ? 'Welcome. Choose a password' : 'Choose a new password'}</h1>
+      <p class="lede">For ${esc(session.user.email)}. Use at least 10 characters; a short phrase is easiest to remember.</p>
+      <form id="pw" novalidate>
         <label class="field"><span>New password</span><input type="password" name="pw" autocomplete="new-password" minlength="10" required></label>
         <label class="field"><span>Type it again</span><input type="password" name="pw2" autocomplete="new-password" required></label>
         <div class="alert error hidden" role="alert" id="pw_err"></div>
@@ -78,8 +83,8 @@
   function setup() {
     document.title = 'First-time setup · Speedy Sales';
     root().innerHTML = authCard(`
-      <h2>First-time setup</h2>
-      <p class="small">Creates the first manager account. It works only once, while the portal has no manager, and needs the setup code from the person who installed it.</p>
+      <h1>First-time setup</h1>
+      <p class="lede">Creates the first manager account. It works only once, while the portal has no manager, and needs the setup code from the person who installed it.</p>
       <form id="su">
         <label class="field"><span>Setup code</span><input type="text" name="code" required autocomplete="off"></label>
         <label class="field"><span>Your name</span><input type="text" name="name" required autocomplete="name"></label>
@@ -99,14 +104,16 @@
     };
   }
 
+  // a background refresh redraws the page only when the person is not in the middle of something
+  const idle = () => !document.querySelector('dialog[open]') && !document.querySelector('.pop') && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName);
   let started = false;
   async function start() {
     let me;
     try { me = await P.rpc('me'); }
-    catch (e) { root().innerHTML = authCard(`<h2>Could not reach the portal</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">Try again</button>`); return; }
+    catch (e) { root().innerHTML = authCard(`<h1>Could not reach the portal</h1><p class="lede">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Try again</button>`); return; }
     if (!me) { await P.sb.auth.signOut(); return signInScreen({ text: 'Your account was not found. Ask your manager for an invite.', kind: 'warn' }); }
     if (!me.active) {
-      root().innerHTML = authCard(`<h2>Your account is not active</h2><p>Ask your manager to turn it on in People and access.</p><button class="btn" data-act="signOut">Sign out</button>`);
+      root().innerHTML = authCard(`<h1>Your account is not active</h1><p class="lede">Ask your manager to turn it on in People and access.</p><button class="btn" data-act="signOut">Sign out</button>`);
       return;
     }
     P.state.me = me;
@@ -114,20 +121,16 @@
     if (!started) {
       started = true;
       window.addEventListener('hashchange', () => { if (P.state.me) P.route(); });
-      // keep lists current across devices: refresh when the app comes back to the front and every 2 minutes while open
-      document.addEventListener('visibilitychange', async () => {
+      // keep data current across devices: when the app comes back to the front, and every 2 minutes while open
+      const refresh = async () => {
         if (document.visibilityState !== 'visible' || !P.state.me) return;
-        P.invalidate();
         const n = await P.rpc('me').catch(() => null);
         if (n) { P.state.me = { ...P.state.me, ...n }; P.setUnread(n.unread); }
-        if (['pool', 'mine', 'gov', 'all'].includes(P.parseHash().name)) { await P.loadBoard(true).catch(() => {}); P.renderList(); }
-      });
-      setInterval(async () => {
-        if (document.visibilityState !== 'visible' || !P.state.me) return;
-        const n = await P.rpc('me').catch(() => null); if (n) P.setUnread(n.unread);
         await P.loadBoard(true).catch(() => {});
-        if (['pool', 'mine', 'gov', 'all'].includes(P.parseHash().name) && !document.querySelector('dialog[open]') && document.activeElement?.tagName !== 'SELECT') P.renderList();
-      }, 120000);
+        if (idle() && ['today', 'pool', 'mine', 'gov', 'all'].includes(P.state.page)) P.state.rerender?.();
+      };
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { P.invalidate(); refresh(); } });
+      setInterval(refresh, 120000);
       P.sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_OUT') { P.state.me = null; signInScreen({ text: 'You are signed out.' }); } });
     }
     if (['welcome', 'setup', ''].includes(P.parseHash().name) || !location.hash) location.hash = '#/today';
@@ -136,7 +139,7 @@
 
   async function boot() {
     if (!P.cfg.supabaseUrl || /YOUR-PROJECT/.test(P.cfg.supabaseUrl)) {
-      root().innerHTML = authCard('<h2>Not set up yet</h2><p>The portal is missing its database address (config.js).</p>'); return;
+      root().innerHTML = authCard('<h1>Not set up yet</h1><p class="lede">The portal is missing its database address (config.js).</p>'); return;
     }
     const r = P.parseHash();
     if (r.name === 'welcome') return welcome(r.params);

@@ -10,7 +10,7 @@ import pg from 'pg';
 const DB = process.argv[2] || 't3', PORT = Number(process.argv[3] || 8787);
 const WEB = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../web');
 const pool = new pg.Pool({ host: 'localhost', port: 54329, user: 'postgres', password: 'pw', database: DB, max: 20 });
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.txt': 'text/plain' };
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS' };
 
 function claims(req) {

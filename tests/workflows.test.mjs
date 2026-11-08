@@ -402,6 +402,19 @@ await test('Team overview and settings work for managers', async () => {
   const t = await m.rpc('team_overview');
   assert.ok(t.people.find(p => p.name === 'Test Flip').open >= 1);
   assert.ok(Array.isArray(t.source_productivity));
+  // each pipeline number means one thing: the Team page's "available" is the pool salespeople can claim
+  const pool = (await a.rpc('get_board')).filter(r => r.stage === 'available').length;
+  assert.equal(t.pipeline.available || 0, pool, 'team pipeline "available" = the Available list');
+  const inReview = (await admin.query(`select count(*)::int n from opportunities where stage='available' and needs_review`)).rows[0].n;
+  assert.equal(t.pipeline.in_review || 0, inReview, 'unreviewed finds are counted separately');
+  const total = (await admin.query('select count(*)::int n from opportunities')).rows[0].n;
+  assert.equal(Object.values(t.pipeline).reduce((s, n) => s + n, 0), total, 'every opportunity counted exactly once');
+  assert.ok('last_activity_at' in t.people.find(p => p.name === 'Test Flip'));
+  // one person's history is for managers only
+  const hist = await m.rpc('person_activity', { p_user: A });
+  assert.ok(Array.isArray(hist) && hist.length >= 1 && hist.every(h => h.at && h.kind));
+  await a.fails('person_activity', { p_user: A }, /manager_only/);
+  await anon.fails('person_activity', { p_user: A }, /permission denied/);
   await m.rpc('update_setting', { p_key: 'stale_days', p_value: '10' });
   await m.fails('update_setting', { p_key: 'stale_days', p_value: '1' }, /bad_value/);
   await m.rpc('update_setting', { p_key: 'stale_days', p_value: '14' });

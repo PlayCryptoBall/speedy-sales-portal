@@ -195,7 +195,7 @@
         ${r.approach && (r.kind === 'gov_bid') ? `<div class="l"><b>How:</b> ${esc((P.APPROACH[r.approach] || [r.approach])[0])}</div>` : ''}
         <div class="l"><b>Call:</b> ${cts || 'No phone on file; see source'}</div>
         ${r.recent_notes ? `<div class="l small"><b>Notes:</b> ${esc(r.recent_notes.split('\n')[0])}</div>` : ''}
-        <div class="l small muted">Source: ${r.source_url ? `<a href="${esc(r.source_url)}">${esc(r.source_url)}</a>` : 'not recorded'}. Last verified: ${r.last_verified_at ? esc(P.date(r.last_verified_at)) : 'not re-checked yet'}.</div></div>`;
+        <div class="l small muted">Source: ${r.source_url ? `<a href="${P.url(r.source_url)}">${esc(r.source_url)}</a>` : 'not recorded'}. Last verified: ${r.last_verified_at ? esc(P.date(r.last_verified_at)) : 'not re-checked yet'}.</div></div>`;
     };
     const used = new Set(), take = (list) => list.filter(r => !used.has(r.id) && used.add(r.id));
     const now = Date.now();
@@ -259,11 +259,14 @@
       const plan = await P.rpc('import_preview', { p_rows: rows });
       lastRows = rows; lastFile = file.name;
       const applying = plan.filter(p => !p.skip && p.changes.some(c => c.apply));
-      out.innerHTML = `<div class="alert ${applying.length ? 'info' : 'warn'}">${applying.length} rows have changes to save. ${plan.length - applying.length} rows have nothing to save or were skipped (reasons below). Nothing is saved until you press Save.</div>
-        <div class="scroll-x sheet"><table class="data"><thead><tr><th>Row</th><th>Lead</th><th>Matched by</th><th>Proposed changes</th></tr></thead><tbody>
-        ${plan.map(p => `<tr><td class="small">${esc(p.sheet)} ${p.row}</td><td>${p.ref ? `<a href="#/lead/${p.opportunity_id}">${esc(p.ref)}</a> ` : ''}<span class="small">${esc(p.title || '')}</span></td><td class="small">${esc(p.match || '')}</td>
-          <td>${p.skip ? `<span class="muted small">${esc(p.skip)}</span>` : p.changes.map(c => `<div class="small">${c.apply ? '<span class="tag won">Save</span>' : '<span class="tag">Skip</span>'} ${esc(c.field === 'note' ? 'Note: ' + String(c.to).slice(0, 120) : c.field === 'stage' ? `Status ${c.from} to ${c.to}` : `Follow-up ${c.from || 'none'} to ${c.to}`)} <span class="muted">${esc(c.reason)}</span></div>`).join('')}</td></tr>`).join('')}
-        </tbody></table></div>
+      const quiet = plan.filter(p => p.skip && /nothing new/i.test(p.skip)), loud = plan.filter(p => !quiet.includes(p));
+      const table = (list) => `<div class="tablewrap" style="margin-top:10px"><table class="tbl"><thead><tr><th scope="col">Row</th><th scope="col">Lead</th><th scope="col">Matched by</th><th scope="col">Proposed changes</th></tr></thead><tbody>
+        ${list.map(p => `<tr><td class="small nowrap">${esc(p.sheet)} ${p.row}</td><td>${p.ref ? `<a href="#/lead/${p.opportunity_id}" data-lead="${p.opportunity_id}">${esc(p.ref)}</a> ` : ''}<span class="small">${esc(p.title || '')}</span></td><td class="small">${esc(p.match || '')}</td>
+          <td>${p.skip ? `<span class="muted small">${esc(p.skip)}</span>` : p.changes.map(c => `<div class="small">${c.apply ? '<span class="badge ok">Save</span>' : '<span class="badge later">Skip</span>'} ${esc(c.field === 'note' ? 'Note: ' + String(c.to).slice(0, 120) : c.field === 'stage' ? `Status ${c.from} to ${c.to}` : `Follow-up ${c.from || 'none'} to ${c.to}`)} <span class="muted">${esc(c.reason)}</span></div>`).join('')}</td></tr>`).join('')}
+        </tbody></table></div>`;
+      out.innerHTML = `<div class="alert ${applying.length ? 'info' : 'warn'}">${applying.length} ${applying.length === 1 ? 'row has' : 'rows have'} changes to save. Nothing is saved until you press Save.</div>
+        ${loud.length ? table(loud) : ''}
+        ${quiet.length ? `<details class="plain" style="margin-top:10px"><summary>${P.plural(quiet.length, 'row')} with nothing new</summary>${table(quiet)}</details>` : ''}
         ${applying.length ? '<button class="btn primary" style="margin-top:12px" data-act="importApply">Save these changes</button>' : ''}`;
     } catch (e) { out.innerHTML = `<div class="alert error">${esc(e.message)}</div>`; }
   };

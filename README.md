@@ -6,7 +6,7 @@ Private lead portal for Speedy Concrete Cutting's Orlando sales team. Each sales
 
 | Piece | What it does | Where it runs |
 |---|---|---|
-| `web/` | The app (plain HTML, CSS, JavaScript; no build step) | GitHub Pages |
+| `web/` | The app (plain HTML, CSS, JavaScript; no build step). Logo, icons and the IBM Plex Sans font are in `web/assets/` | GitHub Pages |
 | `supabase/migrations/` | Database tables, permission rules, every action the app can take | Supabase Postgres |
 | `supabase/functions/admin-users` | Invites, reset links, role changes, turning accounts off | Supabase Edge Functions |
 | `supabase/functions/refresh` | Reads SAM.gov and FDOT/Turnpike letting results on a schedule | Supabase Edge Functions + pg_cron |
@@ -18,7 +18,7 @@ Security model: the browser holds only the project URL and the publishable key (
 ## Setup (one time)
 
 1. **Supabase**: create the organization and a project (Free plan is enough to start). Region `us-east-1`.
-2. **Database**: run `supabase/migrations/001` to `005`, then the generated legacy import (kept outside the repo), then `007_secrets.sql`, then `006_schedules.sql` with the functions URL filled in.
+2. **Database**: run `supabase/migrations/001` to `005`, then the generated legacy import (kept outside the repo), then `007_secrets.sql`, then `006_schedules.sql` with the functions URL filled in, then `008_team_metrics.sql`.
 3. **Edge functions**: deploy `admin-users` and `refresh` (both with JWT verification off; they check callers themselves). The scheduler secret and first-manager setup code live in the database, so no function secrets are required. Optional: `SAM_API_KEY`.
 4. **Auth settings** (Supabase dashboard, Authentication): turn off "Allow new users to sign up". Optional: raise "Email OTP expiration" so invite links last longer than 1 hour (max 24 h).
 5. **Web**: put the project URL and publishable key in `web/config.js`. GitHub: Settings, Pages, Source "GitHub Actions". The workflow in `.github/workflows/pages.yml` publishes `web/`.
@@ -36,8 +36,15 @@ Security model: the browser holds only the project URL and the publishable key (
 ## Tests
 
 ```
-tests/reset_db.sh t1 && psql ... -f <import.sql>
-node tests/workflows.test.mjs t1          # 25 database workflows: claim races, permissions, refresh safety, import, exports
+tests/reset_db.sh t1 && psql ... -d t1 -f <import.sql>     # same for t2 and t3
+node tests/workflows.test.mjs t1          # 25 database workflows: claim races, permissions, refresh safety, import, exports, team counts
 node --experimental-strip-types tests/parsers.test.mjs t2   # FDOT and SAM.gov parsers on saved real responses
-node tests/server.mjs t3 8787 & node tests/ui.test.mjs t3 8787 ./shots   # 13 browser tests, phone and desktop
+node tests/server.mjs t3 8787 & node tests/ui.test.mjs t3 8787 ./shots   # 20 browser tests, phone and desktop
 ```
+
+## Interface notes
+
+- **Layout**: grouped sidebar on desktop (collapsible; collapsed by default on tablets), top bar and bottom tabs on phones. Lead and person details open in a side panel over the page you were on; Back or Escape closes it, and its address can be shared (`#/pool?lead=<id>`).
+- **Leads**: Available, My pipeline, All leads and Gov contracts share one list: search, filters (shown as removable chips), sorting, and list, card, table (choose columns) or board views. The board moves leads between stages and asks for whatever the stage requires (a reason for won, lost or disqualified; a date for Follow up).
+- **Counts**: every number says what it counts. The Team page's "Available to claim" is the same pool salespeople see; new finds waiting for a manager's review are counted separately as "Waiting for review".
+- **Colour**: blue is for things you can act on; orange and amber mark priority and dates that matter; red only marks failures.
