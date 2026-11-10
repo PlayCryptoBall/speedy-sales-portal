@@ -659,6 +659,23 @@ await test('Morning schedule (Eastern time): collect once, retry failures, snaps
   assert.ok(!(await tick('2027-07-14 09:17+00')).ran.includes('morning'), '5:17 AM EDT is not the start time');
 });
 
+await test('Missed morning step: the 5:15 check starts the collection itself; no false "not run" alarm', async () => {
+  await admin.query(`delete from private.test_refresh_calls; delete from private.scheduler_steps where day = '2026-11-20'; delete from morning_snapshots where day = '2026-11-20'`);
+  const auto = (await admin.query(`select id from sources where kind = 'automated' and enabled order by id`)).rows.map(r => r.id);
+  const tick = async (iso) => (await admin.query(`select private.scheduler_tick($1::timestamptz) r`, [iso])).rows[0].r;
+  assert.deepEqual((await tick('2026-11-20 05:40-05')).ran, ['verify'], 'collection starts; the snapshot waits for it');
+  assert.deepEqual((await admin.query(`select source from private.test_refresh_calls order by source`)).rows.map(r => r.source), auto, 'late start ran every source');
+  for (const src of auto) await admin.query(`insert into refresh_runs (source_id, trigger, started_at, status, finished_at) values ($1, 'schedule', '2026-11-20 05:41-05', 'success', '2026-11-20 05:44-05')`, [src]);
+  await tick('2026-11-20 05:50-05'); await tick('2026-11-20 06:05-05');
+  const s = (await admin.query(`select * from morning_snapshots where day = '2026-11-20'`)).rows[0];
+  assert.equal(s.status, 'ready'); assert.equal(s.alerted_at, null);
+  // nothing ran at all before the snapshot (e.g. the scheduler was switched on mid-morning): runs since midnight count
+  await admin.query(`delete from private.scheduler_steps where day = '2026-11-21'; delete from morning_snapshots where day = '2026-11-21'`);
+  for (const src of auto) await admin.query(`insert into refresh_runs (source_id, trigger, started_at, status, finished_at) values ($1, 'schedule', '2026-11-21 04:00-05', 'success', '2026-11-21 04:03-05')`, [src]);
+  await tick('2026-11-21 07:05-05');
+  assert.equal((await admin.query(`select status from morning_snapshots where day = '2026-11-21'`)).rows[0].status, 'ready');
+});
+
 await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {
   const cur = (await admin.query(`select value from settings where key = 'refresh_schedule'`)).rows[0].value;
   await m.fails('update_setting', { p_key: 'refresh_schedule', p_value: { ...cur, morning: '4:15am' } }, /bad_value/);
