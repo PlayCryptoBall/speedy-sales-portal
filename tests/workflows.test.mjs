@@ -420,6 +420,124 @@ await test('Team overview and settings work for managers', async () => {
   await m.rpc('update_setting', { p_key: 'stale_days', p_value: '14' });
 });
 
+
+// ---------------------------------------------------------------- statewide discovery
+const proj = async (key) => (await admin.query(`select * from projects where external_key = $1 or $1 = any(alt_keys)`, [key])).rows[0];
+const oppsOf = async (pid) => (await admin.query(`select * from opportunities where project_id = $1 order by created_at`, [pid])).rows;
+
+await test('Discovery routing: documented scope goes to the pool and alerts managers, inferred goes to the pool, weak signals go to review', async () => {
+  const id = await run();
+  const base = { source_id: 'sam_gov', level: 'Federal', region: 'Central FL', county: 'Orange', city: 'Orlando', stage: 'bidding', deadline: '2099-02-01T14:00:00-05:00' };
+  const hi = await svc.rpc('refresh_upsert_project', { p_run: id, p: { ...base, external_key: 'sam:disc-high', title: 'Concrete coring and wall sawing, Building 7', relevance: 'high', relevance_score: 6,
+    evidence: [{ term: 'core drilling', confidence: 'documented', field: 'title', snippet: 'Concrete coring' }], category: 'Institutional & government', review_reason: 'Source names Speedy work: core drilling',
+    opportunity: { kind: 'gov_bid', approach: 'bid_direct', title: 'Concrete coring and wall sawing, Building 7', next_action: 'Bid it' } } });
+  const pot = await svc.rpc('refresh_upsert_project', { p_run: id, p: { ...base, external_key: 'sam:disc-pot', title: 'Lift station 12 rehabilitation, Apopka', relevance: 'potential',
+    evidence: [{ term: 'lift / pump station', confidence: 'inferred', field: 'title', snippet: 'Lift station 12' }], opportunity: { kind: 'gov_bid', approach: 'quote_bidders', title: 'Lift station 12' } } });
+  const rev = await svc.rpc('refresh_upsert_project', { p_run: id, p: { ...base, external_key: 'sam:disc-rev', title: 'Sidewalk gap program', relevance: 'review', review_reason: 'Weak signal: sidewalks / ADA',
+    opportunity: { kind: 'gov_bid', approach: 'quote_bidders', title: 'Sidewalk gap program' } } });
+  const [o1] = await oppsOf(hi.project_id), [o2] = await oppsOf(pot.project_id), [o3] = await oppsOf(rev.project_id);
+  assert.equal(o1.needs_review, false); assert.equal(o2.needs_review, false); assert.equal(o3.needs_review, true); assert.equal(o3.review_kind, 'discovery');
+  assert.match(o3.review_reason, /Weak signal/);
+  const alerts = (await admin.query(`select * from notifications where user_id = $1 and kind = 'discovery' and opportunity_id = any($2)`, [M, [o1.id, o2.id, o3.id]])).rows;
+  assert.equal(alerts.length, 1, 'one alert for the documented-scope find only'); assert.match(alerts[0].title, /Confirmed Speedy scope: Concrete coring/);
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { ...base, external_key: 'sam:disc-high', title: 'Concrete coring and wall sawing, Building 7', relevance: 'high' } });
+  assert.equal((await admin.query(`select count(*)::int n from notifications where kind = 'discovery' and opportunity_id = $1`, [o1.id])).rows[0].n, 1, 'no repeat alert for an unchanged project');
+  const p1 = await proj('sam:disc-high');
+  assert.equal(p1.relevance, 'high'); assert.equal(p1.evidence[0].confidence, 'documented');
+  const detail = await a.rpc('get_opportunity', { p_id: o1.id });
+  assert.equal(detail.project.evidence[0].term, 'core drilling'); assert.equal(detail.project.category, 'Institutional & government');
+  const scored = await opp(`id = '${o1.id}'`);
+  assert.ok(scored.priority_reasons.fit.some(f => f.factor === 'Scope evidence' && /Source documents core drilling/.test(f.text)));
+  const board = await b.rpc('get_board', {});
+  assert.ok(!board.some(r => r.id === o3.id), 'salespeople do not see review items');
+});
+
+await test('Same project on two sources: a federal award with the same solicitation number merges into the SAM.gov project', async () => {
+  const id = await run('usaspending_awards');
+  const samP = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:merge-1', source_id: 'sam_gov', solicitation_no: '36C24826R0039', title: 'Renovate interventional radiology suites, Gainesville VAMC',
+    level: 'Federal', county: 'Alachua', region: 'Northeast FL', stage: 'bid_closed', relevance: 'potential', opportunity: { kind: 'gov_bid', approach: 'quote_bidders', title: 'Renovate IR suites' } } });
+  const r = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'usaspending:CONT_AWD_X1', alt_keys: ['piid:36C24827C0011'], source_id: 'usaspending_awards',
+    solicitation_no: '36C24826R0039', title: 'Bb - renovate IR suites (different wording)', county: 'Alachua', region: 'Northeast FL', stage: 'awarded', relevance: 'potential',
+    winner: { name: 'Blue Cord Design And Construction, LLC', amount: 12974316, status: 'awarded', as_of: '2026-10-15' } } });
+  assert.equal(r.project_id, samP.project_id); assert.equal(r.merged, true);
+  const p = await proj('sam:merge-1');
+  assert.ok(p.alt_keys.includes('usaspending:CONT_AWD_X1') && p.alt_keys.includes('piid:36C24827C0011'));
+  assert.match(p.title, /Gainesville VAMC/, 'the original source keeps its title');
+  assert.equal(p.stage, 'awarded'); assert.equal(p.winner_status, 'awarded');
+  const opps = await oppsOf(p.id);
+  assert.equal(opps.filter(o => o.kind === 'contractor_outreach' && o.stage === 'available').length, 1, 'one outreach lead for the awardee');
+  assert.equal(opps.find(o => o.kind === 'gov_bid').stage, 'archived', 'the bid tracker is replaced, not duplicated');
+  const again = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'usaspending:CONT_AWD_X1', source_id: 'usaspending_awards', stage: 'awarded',
+    winner: { name: 'Blue Cord Design And Construction, LLC', amount: 12974316, status: 'awarded', as_of: '2026-10-15' } } });
+  assert.equal(again.project_id, p.id); assert.equal((await oppsOf(p.id)).length, opps.length, 'second run adds nothing');
+  const award = (await admin.query(`select count(*)::int n from notifications where kind = 'award' and user_id = $1`, [M])).rows[0].n;
+  assert.equal(award, 1, 'managers get one alert for a relevant new award');
+});
+
+await test('Similar titles in the same county: clear matches merge, unclear ones are saved separately and sent to review as possible duplicates', async () => {
+  const id = await run('orlando_permits');
+  const first = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'news:dup-1', source_id: 'private_news', title: 'Orlando Health Lakeland Highlands tower expansion',
+    owner_name: 'Orlando Health', county: 'Orange', city: 'Orlando', region: 'Central FL', stage: 'planning', relevance: 'potential',
+    opportunity: { kind: 'private_project', approach: 'approach_developer', title: 'Orlando Health tower' } } });
+  const same = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'orlando:BLD-DUP-1', source_id: 'orlando_permits', title: 'Orlando Health Lakeland Highlands Tower Expansion',
+    owner_name: 'ORLANDO HEALTH INC', county: 'Orange', city: 'Orlando', region: 'Central FL', stage: 'permitting', relevance: 'potential',
+    opportunity: { kind: 'private_project', approach: 'approach_prime', title: 'Brasfield & Gorrie — tower', company_name: 'Brasfield & Gorrie' } } });
+  assert.equal(same.project_id, first.project_id); assert.equal(same.merged, true); assert.match(same.match_note, /another source/);
+  const unclear = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'orlando:BLD-DUP-2', source_id: 'orlando_permits', title: 'Orlando Health Lakeland parking tower',
+    owner_name: 'Some Other Owner LLC', county: 'Orange', city: 'Orlando', region: 'Central FL', stage: 'permitting', relevance: 'potential',
+    opportunity: { kind: 'private_project', approach: 'approach_prime', title: 'Parking tower', company_name: 'Finfrock Construction', company_phone: '(407) 293-4000' } } });
+  assert.notEqual(unclear.project_id, first.project_id);
+  assert.equal(unclear.duplicate_of, first.project_id);
+  const [o] = await oppsOf(unclear.project_id);
+  assert.equal(o.needs_review, true); assert.equal(o.review_kind, 'duplicate'); assert.match(o.review_reason, /Possible duplicate/);
+  const c = (await admin.query(`select c.phone, c.source from contacts c join companies k on k.id = c.company_id where k.name_key = 'finfrock construction'`)).rows;
+  assert.equal(c.length, 1); assert.equal(c[0].source, 'source_document');
+  const d = await m.rpc('get_opportunity', { p_id: o.id });
+  assert.equal(d.project.possible_duplicate.id, first.project_id);
+  await m.rpc('resolve_review', { p_id: o.id, p_action: 'archive', p_note: 'Same job as the news lead' });
+  assert.equal((await opp(`id = '${o.id}'`)).stage, 'archived');
+});
+
+await test('A cancellation from a different source does not cancel the project; one from its own source does', async () => {
+  const id = await run('usaspending_awards');
+  const p0 = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:cx-1', source_id: 'sam_gov', solicitation_no: 'W912EP26B0099', title: 'Seawall repair, Patrick SFB',
+    county: 'Brevard', region: 'Central FL', stage: 'bidding', relevance: 'potential', deadline: '2099-03-01T14:00:00-05:00', opportunity: { kind: 'gov_bid', approach: 'quote_bidders', title: 'Seawall repair' } } });
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'usaspending:cx', source_id: 'usaspending_awards', solicitation_no: 'W912EP26B0099', stage: 'cancelled', title: 'x' } });
+  assert.equal((await proj('sam:cx-1')).stage, 'bidding');
+  const r = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:cx-1', source_id: 'sam_gov', stage: 'cancelled' } });
+  assert.ok(r.material.includes('The agency cancelled this project')); assert.equal((await proj('sam:cx-1')).stage, 'cancelled');
+});
+
+await test('Discovery monitoring and search terms are manager-only; the refresh job reads the live vocabulary', async () => {
+  const ov = await m.rpc('discovery_overview', {});
+  assert.equal(ov.counties.length, 67); assert.equal(new Set(ov.counties.map(c => c.region)).size, 6);
+  assert.ok(ov.sources.some(s => s.id === 'usaspending_awards' && s.kind === 'automated'));
+  assert.ok(ov.sources.some(s => s.id === 'paid_platforms' && s.kind === 'paid'));
+  assert.ok(ov.counties.find(c => c.county === 'Orange').local_sources.includes('City of Orlando commercial building permits'));
+  assert.ok(ov.summary.awaiting_review >= 1); assert.ok(ov.summary.duplicates_open >= 0);
+  await a.fails('discovery_overview', {}, /manager_only/);
+  await a.fails('service_terms_list', {}, /manager_only/);
+  await a.fails('save_service_term', { p: { label: 'x', pattern: 'x' } }, /manager_only/);
+  await a.fails('discovery_terms', {}, /permission denied/);
+  const terms = await svc.rpc('discovery_terms', {});
+  assert.ok(terms.length > 40 && terms.some(t => t.label === 'core drilling' && t.kind === 'direct'));
+  await m.fails('save_service_term', { p: { label: 'broken', pattern: '(abc', kind: 'direct' } }, /bad_pattern/);
+  const saved = await m.rpc('save_service_term', { p: { label: 'helipad', pattern: 'helipads?', kind: 'direct', services: ['Slab sawing'] } });
+  assert.ok((await svc.rpc('discovery_terms', {})).some(t => t.label === 'helipad'));
+  await m.rpc('save_service_term', { p: { id: saved.id, enabled: false } });
+  assert.ok(!(await svc.rpc('discovery_terms', {})).some(t => t.label === 'helipad'), 'turned-off terms are not used');
+  assert.equal((await admin.query(`select count(*)::int n from projects where region in ('North FL','South FL')`)).rows[0].n, 0, 'old region names are gone');
+});
+
+await test('Run counts include what each refresh examined and how much of it was relevant', async () => {
+  const id = await run('orlando_permits');
+  await svc.rpc('refresh_finish_run', { p_run: id, p_status: 'success', p_counts: { examined: 120, relevant: 18, low: 102, fetched: 18, discovered: 5 }, p_log: ['ok'] });
+  const r = (await admin.query(`select examined, relevant, low, discovered from refresh_runs where id = $1`, [id])).rows[0];
+  assert.deepEqual(r, { examined: 120, relevant: 18, low: 102, discovered: 5 });
+  const ov = await m.rpc('discovery_overview', {});
+  assert.equal(ov.sources.find(s => s.id === 'orlando_permits').last_run.examined, 120);
+});
+
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

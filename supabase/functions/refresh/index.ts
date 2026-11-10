@@ -2,9 +2,11 @@
 // It updates project FACTS only through the refresh_* database functions, which never touch sales work.
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 import {
-  FDOT_BASE, FDOT_DISTRICTS, fdotPayload, groupNotices, normalizeOfficial, normalizeSgs, parseFdotList, parseFdotReport,
-  relevance, SAM_SEARCH, samFacts, samPayload, type SamNotice,
+  classify, FDOT_BASE, FDOT_DISTRICTS, fdotPayload, groupNotices, isNoticeId, morePages, normalizeDetails, normalizeOfficial, normalizeOrlandoPermit,
+  normalizeSgs, normalizeUsa, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
+  USA_NAICS, usaPayload, usaSearchBody,
 } from './lib.ts';
+import { DEFAULT_TERMS, type Term } from './terms.ts';
 
 const URL_ = Deno.env.get('SUPABASE_URL')!;
 const SERVICE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -16,19 +18,24 @@ const db = createClient(URL_, SERVICE, { auth: { persistSession: false } });
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 class Run {
-  log: string[] = []; counts = { fetched: 0, discovered: 0, updated: 0, merged: 0, flagged: 0, unchanged: 0, errors: 0 };
-  requests = 0; last = 0;
-  constructor(public id: number, public gapMs: number, public maxRequests: number) {}
+  log: string[] = []; counts = { fetched: 0, discovered: 0, updated: 0, merged: 0, flagged: 0, unchanged: 0, errors: 0, examined: 0, relevant: 0, low: 0 };
+  terms: Term[] = DEFAULT_TERMS;
+  requests = 0; last = 0; started = Date.now();
+  constructor(public id: number, public gapMs: number, public maxRequests: number, public budgetMs = 110000) {}
+  // Edge functions stop after about 150 s, so each run stops taking new work after its time budget and leaves the rest for the next run.
+  timeUp() { return Date.now() - this.started > this.budgetMs; }
   note(s: string) { this.log.push(`${new Date().toISOString().slice(11, 19)} ${s}`); if (this.log.length > 400) this.log.splice(1, 1); }
   // polite fetch: spacing between requests, a per-run cap, 3 tries with backoff on network errors, 429 and 5xx
-  async get(url: string, accept = 'text/html') {
+  async get(url: string, accept = 'text/html', body?: unknown) {
     if (this.requests >= this.maxRequests) throw new Error(`request cap of ${this.maxRequests} reached for this run`);
     for (let attempt = 1; attempt <= 3; attempt++) {
       const wait = this.last + this.gapMs - Date.now();
       if (wait > 0) await sleep(wait);
       this.last = Date.now(); this.requests++;
       try {
-        const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: accept }, signal: AbortSignal.timeout(25000) });
+        const res = await fetch(url, body === undefined
+          ? { headers: { 'User-Agent': UA, Accept: accept }, signal: AbortSignal.timeout(25000) }
+          : { method: 'POST', headers: { 'User-Agent': UA, Accept: accept, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
         if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`);
         if (!res.ok) { const e = new Error(`HTTP ${res.status}`); (e as any).fatal = true; throw e; }
         return accept.includes('json') ? await res.json() : await res.text();
@@ -48,6 +55,7 @@ class Run {
     else if (data.action === 'updated') this.counts.updated++;
     else this.counts.unchanged++;
     if (data.merged) this.counts.merged++;
+    if (data.duplicate_of) this.note(`${p.external_key}: possible duplicate of an existing project, sent to review`);
     this.counts.flagged += data.flagged || 0;
     if (data.material?.length) this.note(`${p.external_key}: ${data.material.join('; ')}`);
     return data;
@@ -63,14 +71,17 @@ async function tracked(source: string) {
 // ---------------------------------------------------------------- FDOT and Turnpike preliminary letting results
 async function runFdot(run: Run, cfg: any) {
   const lookback = cfg.lookback_days ?? 30;
+  // Statewide: the home regions use a lower bar; the rest of Florida needs a bigger job to be worth a review.
   const minAmt = cfg.untracked_min_amount ?? 1_000_000;
   const regions: string[] = cfg.untracked_regions ?? ['Central FL', 'Tampa Bay'];
+  const statewideMin = cfg.statewide_min_amount ?? 3_000_000;
   const since = new Date(Date.now() - lookback * 86400000).toISOString().slice(0, 10);
   const mine = await tracked('fdot_lettings');
   const keys = new Set<string>();
   for (const t of mine) { keys.add(t.external_key); (t.alt_keys || []).forEach(k => keys.add(k)); }
   let reports = 0, skippedUntracked = 0;
   for (const d of FDOT_DISTRICTS) {
+    if (run.timeUp()) { run.note(`time budget reached at district ${d}`); break; }
     let list;
     try { list = parseFdotList(await run.get(`${FDOT_BASE}/LettingResults?districtID=${d}`)); }
     catch (e) { run.counts.errors++; run.note(`district ${d} list failed: ${(e as Error).message}`); continue; }
@@ -80,14 +91,16 @@ async function runFdot(run: Run, cfg: any) {
       let rep;
       try { rep = parseFdotReport(await run.get(l.url)); reports++; }
       catch (e) { run.counts.errors++; run.note(`report ${l.id} failed: ${(e as Error).message}`); continue; }
-      if (!rep.complete) { run.note(`report ${l.id} (${l.date}): "${rep.status || 'no status'}", skipped until results post`); continue; }
+      if (!rep.complete) { run.note(`report ${l.id} (${l.date}): ${rep.contracts.length ? 'letting in progress or no bids posted' : 'no contracts listed'}, skipped until results post`); continue; }
       for (const c of rep.contracts) {
+        run.counts.examined++;
         const key = `fdot:${c.contract.replace(/-R0$/, '')}`;
         const isTracked = keys.has(key);
         if (!isTracked) {
           const low = c.bidders[0]?.amount ?? 0;
           const p = fdotPayload(c, l, d, false);
-          if (low < minAmt || !regions.includes(String(p.region))) { skippedUntracked++; continue; }
+          if (low < (regions.includes(String(p.region)) ? minAmt : statewideMin)) { skippedUntracked++; run.counts.low++; continue; }
+          run.counts.relevant++;
           await run.upsert(p);
         } else {
           await run.upsert(fdotPayload(c, l, d, true));
@@ -95,29 +108,41 @@ async function runFdot(run: Run, cfg: any) {
       }
     }
   }
-  run.note(`${reports} reports read; ${skippedUntracked} untracked contracts skipped (under $${minAmt.toLocaleString()} or outside ${regions.join(', ')})`);
+  run.note(`${reports} reports read; ${skippedUntracked} untracked contracts skipped (low bid under $${minAmt.toLocaleString()} in ${regions.join(', ')}, or under $${statewideMin.toLocaleString()} elsewhere)`);
 }
 
 // ---------------------------------------------------------------- SAM.gov
-async function samSearch(run: Run, params: Record<string, string>): Promise<SamNotice[]> {
+async function samSearch(run: Run, params: Record<string, string>, maxPages = 1): Promise<SamNotice[]> {
+  const out: SamNotice[] = [];
   if (SAM_API_KEY) {
     // official API (free key from a SAM.gov account)
     const to = new Date(), from = new Date(Date.now() - 30 * 86400000);
     const f = (x: Date) => `${String(x.getMonth() + 1).padStart(2, '0')}/${String(x.getDate()).padStart(2, '0')}/${x.getFullYear()}`;
-    const qs = new URLSearchParams({ api_key: SAM_API_KEY, postedFrom: f(from), postedTo: f(to), limit: '100', state: 'FL',
-      ...(params.q ? { title: params.q.replace(/"/g, '') } : {}), ...(params.sol ? { solnum: params.sol } : {}) });
-    const j = await run.get(`https://api.sam.gov/opportunities/v2/search?${qs}`, 'application/json');
-    return (j.opportunitiesData || []).map(normalizeOfficial);
+    for (let page = 0; ; page++) {
+      const qs = new URLSearchParams({ api_key: SAM_API_KEY, postedFrom: f(from), postedTo: f(to), limit: '100', offset: String(page * 100), state: 'FL',
+        ...(params.q ? { title: params.q.replace(/"/g, '') } : {}), ...(params.sol ? { solnum: params.sol } : {}) });
+      const j = await run.get(`https://api.sam.gov/opportunities/v2/search?${qs}`, 'application/json');
+      const got = (j.opportunitiesData || []).map(normalizeOfficial);
+      out.push(...got);
+      if (!morePages(got.length, 100, page, maxPages, j.totalRecords)) break;
+    }
+    return out;
   }
-  const qs = new URLSearchParams({ index: 'opp', page: '0', size: params.size || '50', mode: 'search', sort: '-modifiedDate', ...params });
-  qs.delete('sol');
-  const j = await run.get(`${SAM_SEARCH}?${qs}`, 'application/hal+json');
-  return ((j?._embedded?.results) || []).map(normalizeSgs);
+  const size = Number(params.size || '50');
+  for (let page = 0; ; page++) {
+    const qs = new URLSearchParams({ index: 'opp', page: String(page), size: String(size), mode: 'search', sort: '-modifiedDate', ...params });
+    qs.delete('sol'); qs.set('page', String(page));
+    const j = await run.get(`${SAM_SEARCH}?${qs}`, 'application/hal+json');
+    const got = ((j?._embedded?.results) || []).map(normalizeSgs);
+    out.push(...got);
+    if (!morePages(got.length, size, page, maxPages, j?.page?.totalElements)) break;
+  }
+  return out;
 }
 
 async function samDetails(run: Run, id: string) {
   if (SAM_API_KEY) return null;
-  try { return await run.get(`https://sam.gov/api/prod/opps/v2/opportunities/${id}`, 'application/hal+json'); }
+  try { return await run.get(`https://sam.gov/api/prod/opps/v2/opportunities/${id.toLowerCase()}`, 'application/hal+json'); }
   catch (e) { run.note(`details ${id} unavailable: ${(e as Error).message}`); return null; }
 }
 
@@ -129,9 +154,21 @@ async function runSam(run: Run, cfg: any) {
   let checked = 0;
   const failedKeys: string[] = [];
   for (const [sol, t] of trackedSols) {
-    if (checked >= (cfg.max_tracked_checks ?? 40)) { run.note(`tracked check cap reached; ${trackedSols.size - checked} left for the next run`); break; }
+    if (checked >= (cfg.max_tracked_checks ?? 40) || run.timeUp()) { run.note(`tracked check cap reached; ${trackedSols.size - checked} left for the next run`); break; }
     checked++;
     let notices: SamNotice[];
+    if (isNoticeId(sol)) {
+      // no solicitation number on this notice: read it by its notice id instead of searching
+      const det = await samDetails(run, sol);
+      const one = normalizeDetails(det);
+      if (!one) { failedKeys.push(t.external_key); run.note(`${sol}: notice could not be read by id`); continue; }
+      notices = [one];
+      const facts = samFacts(notices, det);
+      const p = samPayload(sol, notices, facts, true, run.terms);
+      p.external_key = t.external_key;
+      await run.upsert(p);
+      continue;
+    }
     try { notices = await samSearch(run, { q: `"${sol}"`, size: '10', sol }); }
     catch (e) { run.counts.errors++; failedKeys.push(t.external_key); run.note(`check ${sol} failed: ${(e as Error).message}`); continue; }
     notices = notices.filter(n => [n.sol, n.originalSol].some(s => (s || '').toUpperCase().replace(/[^A-Z0-9-]/g, '') === sol));
@@ -139,35 +176,112 @@ async function runSam(run: Run, cfg: any) {
     const g = groupNotices(notices);
     const group = [...g.values()].flat().sort((a, b) => String(b.published).localeCompare(String(a.published)));
     const facts = samFacts(group, null);
-    const p = samPayload(sol, group, facts, true);
+    const p = samPayload(sol, group, facts, true, run.terms);
     p.external_key = t.external_key;               // keep the existing record's key; new notice ids go in alt_keys
     await run.upsert(p);
   }
   if (failedKeys.length) await db.rpc('refresh_mark_failed', { p_keys: failedKeys });
-  // 2. discover new Florida construction work
-  const queries: string[] = cfg.queries ?? ['construction', 'demolition', 'concrete', 'renovation', 'repair', 'paving', 'design-build'];
+  // 2. discover new Florida construction work (every page, up to the page cap)
+  const queries: string[] = cfg.queries ?? ['construction', 'demolition', 'concrete', 'renovation', 'repair', 'paving', 'design-build',
+    'bridge', 'pavement', 'runway', 'seawall', 'lift station', 'saw cut', 'core drilling'];
+  const maxPages = cfg.max_pages ?? 4;
   const seen = new Map<string, SamNotice>();
   for (const q of queries) {
+    if (run.timeUp()) { run.note('time budget reached before all searches ran'); break; }
     try {
-      const list = await samSearch(run, { q, is_active: 'true', pop_state: 'FL', size: '50' });
+      const list = await samSearch(run, { q, is_active: 'true', pop_state: 'FL', size: '50' }, maxPages);
       list.forEach(n => seen.set(n.id, n));
       run.note(`search "${q}": ${list.length} active Florida notices`);
     } catch (e) { run.counts.errors++; run.note(`search "${q}" failed: ${(e as Error).message}`); }
   }
   const groups = groupNotices([...seen.values()]);
-  let newOnes = 0, skipped = 0;
+  let newOnes = 0, low = 0;
   const maxNew = cfg.max_new_per_run ?? 25;
   for (const [key, notices] of groups) {
     if (trackedSols.has(key)) continue;          // already handled above
-    const text = notices.map(n => `${n.title} ${n.snippet}`).join(' ');
-    if (relevance(text) === 'skip') { skipped++; continue; }
+    run.counts.examined++;
+    const quick = classify([{ field: 'title', text: notices.map(n => n.title).join(' | ') }, { field: 'description', text: notices.map(n => n.snippet).join(' ') }], run.terms);
+    if (quick.relevance === 'low') { low++; run.counts.low++; continue; }
+    if (run.timeUp()) { run.note('time budget reached; remaining procurements wait for the next run'); break; }
     if (newOnes >= maxNew) { run.note(`new-item cap of ${maxNew} reached; the rest wait for the next run`); break; }
-    newOnes++;
     const details = await samDetails(run, notices[0].id);
     const facts = samFacts(notices, details);
-    await run.upsert(samPayload(key, notices, facts, false));
+    const p = samPayload(key, notices, facts, false, run.terms);
+    if (p.relevance === 'low') { low++; run.counts.low++; continue; }
+    newOnes++; run.counts.relevant++;
+    await run.upsert(p);
   }
-  run.note(`${groups.size} procurements seen; ${skipped} not construction-related; ${newOnes} new or updated`);
+  run.note(`${groups.size} procurements seen; ${low} not relevant to Speedy's services; ${newOnes} new or updated`);
+}
+
+// ---------------------------------------------------------------- USAspending.gov: new federal construction awards in Florida
+async function runUsaspending(run: Run, cfg: any) {
+  const days = cfg.lookback_days ?? 60;
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const minAmount = cfg.min_amount ?? 250_000;
+  const maxNew = cfg.max_new_per_run ?? 30;
+  const known = new Set<string>();
+  for (const t of await tracked('usaspending_awards')) { known.add(t.external_key); (t.alt_keys || []).forEach(k => known.add(k)); }
+  let newOnes = 0;
+  for (let page = 1; page <= (cfg.max_pages ?? 3); page++) {
+    const j = await run.get('https://api.usaspending.gov/api/v2/search/spending_by_award/', 'application/json',
+      usaSearchBody(from, to, cfg.naics ?? USA_NAICS, page));
+    const rows = (j?.results || []).map(normalizeUsa);
+    run.note(`page ${page}: ${rows.length} new Florida construction awards since ${from}`);
+    for (const a of rows) {
+      if (run.timeUp()) { run.note('time budget reached; remaining awards wait for the next run'); break; }
+      run.counts.examined++;
+      if ((a.amount ?? 0) < minAmount) { run.counts.low++; continue; }
+      const cls = classify([{ field: 'award description', text: a.description, doc: `USAspending award ${a.piid}`, url: `https://www.usaspending.gov/award/${a.id}` }],
+        run.terms, { value: a.amount });
+      if (cls.relevance === 'low') { run.counts.low++; continue; }
+      run.counts.relevant++;
+      if (known.has(`usaspending:${a.id}`)) { await run.upsert(usaPayload(a, null, cls, true)); continue; }
+      if (newOnes >= maxNew) { run.note(`new-item cap of ${maxNew} reached; the rest wait for the next run`); continue; }
+      let detail = null;
+      try { detail = await run.get(`https://api.usaspending.gov/api/v2/awards/${encodeURIComponent(a.id)}/`, 'application/json'); }
+      catch (e) { run.note(`award ${a.piid} details unavailable: ${(e as Error).message}`); }
+      newOnes++;
+      await run.upsert(usaPayload(a, detail, cls));
+    }
+    if (!j?.page_metadata?.hasNext) break;
+  }
+  run.note(`${newOnes} new awards saved (minimum $${minAmount.toLocaleString()})`);
+}
+
+// ---------------------------------------------------------------- City building permits (Socrata open data)
+async function runPermits(run: Run, cfg: any, sourceId: string) {
+  const days = cfg.lookback_days ?? 45;
+  const min = cfg.min_value ?? 500_000;
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const base = cfg.dataset ?? 'https://data.cityoforlando.net/resource/ryhf-m453.json';
+  const where = `plan_review_type like 'Commercial%' AND application_type='Building Permit' AND estimated_cost >= ${Number(min)} ` +
+    `AND processed_date > '${since}' AND worktype in ('Alteration','Addition','Repair','Demolition','Demo','New')`;
+  const qs = new URLSearchParams({ $where: where, $order: 'processed_date DESC', $limit: String(cfg.limit ?? 300) });
+  const rows = (await run.get(`${base}?${qs}`, 'application/json')) as any[];
+  run.note(`${rows.length} commercial permits over $${Number(min).toLocaleString()} since ${since}`);
+  const maxNew = cfg.max_new_per_run ?? 40;
+  let newOnes = 0;
+  for (const r of rows) {
+    const x = normalizeOrlandoPermit(r);
+    run.counts.examined++;
+    if (!x.number) continue;
+    const dataset = cfg.public_url ?? 'https://data.cityoforlando.net/resource/ryhf-m453.json';
+    const cls = classify(permitSections(x, `${dataset}?permit_number=${encodeURIComponent(x.number)}`), run.terms, { value: x.value });
+    if (cls.relevance === 'low') { run.counts.low++; continue; }
+    run.counts.relevant++;
+    if (newOnes >= maxNew) { run.note(`new-item cap of ${maxNew} reached; the rest wait for the next run`); break; }
+    newOnes++;
+    await run.upsert(permitPayload(x, cls, { city: cfg.city ?? 'Orlando', county: cfg.county ?? 'Orange', source_id: sourceId,
+      key_prefix: sourceId.split('_')[0], dataset_url: dataset }));
+  }
+}
+
+async function loadTerms(run: Run) {
+  const { data, error } = await db.rpc('discovery_terms');
+  if (error || !Array.isArray(data) || !data.length) { run.note(`using built-in search terms (${error?.message || 'none saved'})`); return; }
+  run.terms = data as Term[];
 }
 
 // ---------------------------------------------------------------- orchestration
@@ -177,12 +291,15 @@ async function runSource(source: string, trigger: string, user: string | null, a
   const { data: runId, error } = await db.rpc('refresh_start_run', { p_source: source, p_trigger: trigger, p_user: user, p_attempt: attempt });
   if (error) throw new Error(error.message);
   const cfg = src.config || {};
-  const run = new Run(runId, source === 'fdot_lettings' ? (cfg.gap_ms ?? 1500) : (cfg.gap_ms ?? 1200), cfg.max_requests ?? 120);
+  const run = new Run(runId, source === 'fdot_lettings' ? (cfg.gap_ms ?? 1500) : (cfg.gap_ms ?? 900), cfg.max_requests ?? 160, cfg.time_budget_ms ?? 110000);
   run.note(`start ${source} (${trigger}, attempt ${attempt})`);
+  await loadTerms(run);
   let status = 'success', err: string | null = null;
   try {
     if (source === 'fdot_lettings') await runFdot(run, cfg);
     else if (source === 'sam_gov') await runSam(run, cfg);
+    else if (source === 'usaspending_awards') await runUsaspending(run, cfg);
+    else if (source.endsWith('_permits')) await runPermits(run, cfg, source);
     else throw new Error('no automated job for this source');
     if (run.counts.errors > 0) status = run.counts.fetched > 0 ? 'partial' : 'failed';
     if (status === 'failed') err = run.log.filter(l => /failed/.test(l)).slice(-1)[0] || 'every request failed';
@@ -196,7 +313,7 @@ async function runSource(source: string, trigger: string, user: string | null, a
 
 async function retryFailed() {
   const { data } = await db.from('sources').select('id, consecutive_failures, last_run_at, last_status')
-    .in('id', ['sam_gov', 'fdot_lettings']).eq('last_status', 'failed').lt('consecutive_failures', 4);
+    .eq('kind', 'automated').eq('enabled', true).eq('last_status', 'failed').lt('consecutive_failures', 4);
   const out = [];
   for (const s of data || []) {
     if (s.last_run_at && Date.now() - new Date(s.last_run_at).getTime() < 45 * 60000) continue;
@@ -234,7 +351,7 @@ Deno.serve(async (req) => {
   const work = (async () => {
     if (source === 'retry_failed') return retryFailed();
     if (source === 'maintenance') return db.rpc('daily_maintenance');
-    const list = source === 'all' ? ['fdot_lettings', 'sam_gov'] : [source];
+    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits'] : [source];
     const out = [];
     for (const s of list) out.push(await runSource(s, trigger, auth.user));
     return out;

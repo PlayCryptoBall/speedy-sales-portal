@@ -297,6 +297,43 @@ await t('Manager: sources tabs, review queue, refresh start, people and invite',
   await mgr.getByRole('button', { name: 'Done' }).click();
 });
 
+await t('Discovery: coverage tab, documented evidence in the lead panel, search terms editor', async () => {
+  const run = (await db.query(`select public.refresh_start_run('sam_gov', 'test') r`)).rows[0].r;
+  const up = (await db.query(`select public.refresh_upsert_project($1, $2) r`, [run, {
+    external_key: 'sam:ui-evidence', source_id: 'sam_gov', title: 'Concrete coring and saw cutting, Hangar 4, Patrick SFB', level: 'Federal', city: 'Patrick SFB', county: 'Brevard', zip: '32925',
+    region: 'Central FL', stage: 'bidding', deadline: '2099-03-01T14:00:00-05:00', relevance: 'high', relevance_score: 6, category: 'Institutional & government',
+    evidence: [{ term: 'core drilling', kind: 'direct', confidence: 'documented', field: 'description', doc: 'SAM.gov Solicitation description', snippet: '…Contractor shall core drill 14 penetrations through the existing hangar slab…', services: ['Core drilling'] },
+               { term: 'renovation / alteration', kind: 'indicator', confidence: 'inferred', field: 'title', snippet: 'Hangar 4 renovation', services: ['GPR scanning'] }],
+    opportunity: { kind: 'gov_bid', approach: 'bid_direct', title: 'Concrete coring and saw cutting, Hangar 4', next_action: 'Bid it' } }])).rows[0].r;
+  const oid = (await db.query(`select id from opportunities where project_id = $1`, [up.project_id])).rows[0].id;
+  await flip.goto(BASE + `#/available?lead=${oid}`);
+  await flip.getByText('Documented in the source').waitFor({ timeout: 15000 });
+  const panel = await flip.locator('.drawer').textContent();
+  assert.match(panel, /core drill 14 penetrations/); assert.match(panel, /Inferred from the project type/); assert.match(panel, /Brevard County · 32925 · Central FL/);
+  await flip.waitForTimeout(500);
+  await shot(flip, '22-lead-evidence');
+  await flip.keyboard.press('Escape');
+  await mgr.goto(BASE + '#/sources');
+  await mgr.getByRole('tab', { name: 'Coverage' }).click();
+  await mgr.getByRole('heading', { name: 'Counties' }).waitFor();
+  assert.equal(await mgr.locator('section:has(h2:text-is("Counties")) tbody tr').count(), 67);
+  assert.match(await mgr.locator('main').textContent(), /USAspending\.gov federal construction awards/);
+  await mgr.selectOption('select[data-act-change="covRegion"]', 'Central FL');
+  assert.equal(await mgr.locator('section:has(h2:text-is("Counties")) tbody tr').count(), 10);
+  await shot(mgr, '23-manager-coverage');
+  await mgr.getByRole('tab', { name: 'Settings' }).click();
+  await mgr.getByRole('heading', { name: 'Search terms' }).waitFor();
+  await mgr.getByRole('button', { name: 'Add a term' }).click();
+  await mgr.fill('[name=label]', 'helipad'); await mgr.fill('[name=pattern]', 'helipads?'); await mgr.fill('[name=services]', 'Slab sawing');
+  await mgr.getByRole('button', { name: 'Save', exact: true }).click();
+  await toast(mgr, /Search term saved/);
+  assert.equal((await db.query(`select count(*)::int n from service_terms where label = 'helipad' and enabled`)).rows[0].n, 1);
+  await mgr.locator('tr:has-text("helipad") button:has-text("Turn off")').click();
+  await toast(mgr, /turned off/);
+  assert.equal((await db.query(`select enabled from service_terms where label = 'helipad'`)).rows[0].enabled, false);
+  await shot(mgr, '24-manager-search-terms');
+});
+
 await t('Manager reassigns with history from the lead panel; All leads table and columns work', async () => {
   await openLead(mgr, leadId);
   await drawer(mgr).getByRole('button', { name: 'More actions' }).click();

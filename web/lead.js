@@ -54,6 +54,9 @@
     const others = (o.company_opps || []).filter(x => x.owner_name && P.ACTIVE.includes(x.stage) && x.owner_name !== P.state.me.full_name);
     if (others.length) out.push(`<div class="alert warn">${P.icon('team')}<div class="grow">${esc([...new Set(others.map(x => x.owner_name))].join(', '))} ${others.length === 1 ? 'is' : 'are'} also working ${esc(o.company?.name || 'this company')}. Coordinate before you call.</div></div>`);
     if (o.superseded_by) out.push(`<div class="alert info">${P.icon('info')}<div class="grow">Follow-up continues in <a href="#/lead/${o.superseded_by.id}" data-lead="${o.superseded_by.id}">${esc(o.superseded_by.ref)}</a>.</div></div>`);
+    const dup = o.project?.possible_duplicate;
+    if (dup && P.isMgr()) out.push(`<div class="alert info">${P.icon('info')}<div class="grow">Looks like <b>${esc(dup.title)}</b>${dup.source_name ? ` (${esc(dup.source_name)})` : ''}${(dup.opps || []).length ? `: ${dup.opps.map(x => `<a href="#/lead/${x.id}" data-lead="${x.id}">${esc(x.ref)}</a>`).join(', ')}` : ''}. Archive one if they are the same job.</div></div>`);
+    if (o.project?.match_note && (o.project.other_sources || []).length) out.push(`<div class="alert info">${P.icon('info')}<div class="grow">${esc(o.project.match_note)}. Also listed by: ${esc(o.project.other_sources.map(k => ({ sam: 'SAM.gov', usaspending: 'USAspending.gov', fdot: 'FDOT', orlando: 'City of Orlando permits', legacy: 'original pipeline', news: 'news' }[k] || k)).join(', '))}.</div></div>`);
     return out.join('');
   }
 
@@ -93,7 +96,8 @@
     const p = o.project || {}, r = o.priority_reasons || {};
     const approach = P.APPROACH[o.approach];
     const facts = [
-      ['Location', p.location_text ? `${esc(p.location_text)}<div class="sub">${esc(P.place(p))}</div>` : esc(P.place(p))],
+      ['Location', `${p.location_text ? esc(p.location_text) + '<div class="sub">' : ''}${esc([p.city, p.county ? p.county + ' County' : '', p.zip, p.region && p.region !== 'Unknown' ? p.region : ''].filter(Boolean).join(' · ') || 'Location not recorded')}${p.location_text ? '</div>' : ''}`],
+      p.category && ['Project type', esc(p.category)],
       ['Project stage', `${esc(P.PSTAGE[p.stage] || p.stage || '')}${p.status_text ? `<div class="sub">${esc(p.status_text)}</div>` : ''}`],
       p.deadline && [p.stage === 'upcoming' ? 'Response due' : 'Bid deadline', `${esc(P.deadline(p))}${p.deadline_note ? `<div class="sub">${esc(p.deadline_note)}</div>` : ''}`],
       ['Project value', p.project_value ? `${esc(P.money(p.project_value))} <span class="sub">whole project, not Speedy's share</span>` : p.value_label ? esc(p.value_label) : P.unknown('Not public')],
@@ -103,7 +107,12 @@
       o.expected_work_date && ['Expected work', esc(P.date(o.expected_work_date))],
     ].filter(Boolean);
     const confirmed = o.services_confirmed || [], likely = (o.services || []).filter(s => !confirmed.includes(s));
-    const svc = confirmed.length || likely.length || (p.scope_evidence || []).length || o.speedy_scope || o.scope_confirmed_note;
+    const ev = Array.isArray(p.evidence) ? p.evidence : [];
+    const documented = ev.filter(e => e.confidence === 'documented'), inferred = ev.filter(e => e.confidence !== 'documented');
+    const svc = confirmed.length || likely.length || (p.scope_evidence || []).length || ev.length || o.speedy_scope || o.scope_confirmed_note;
+    const evRow = (e) => `<li><div><b class="strong">${esc(e.term)}</b>${(e.services || []).length ? ` <span class="small muted">→ ${esc(e.services.slice(0, 3).join(', '))}</span>` : ''}</div>
+      ${e.snippet ? `<q class="snip">${esc(e.snippet)}</q>` : ''}
+      <div class="small faint">${esc([e.doc || '', e.field ? 'in the ' + e.field : '', e.page ? 'page ' + e.page : ''].filter(Boolean).join(', '))}${e.url ? ` · <a href="${P.url(e.url)}" target="_blank" rel="noopener">Open</a>` : ''}</div></li>`;
     const others = (o.company_opps || []).length + (o.project_opps || []).length + (o.company_contact_log || []).length;
     return `${nextCard(o) ? `<div class="panel">${nextCard(o)}</div>` : ''}
       <div class="panel"><h3>Key facts</h3><dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl></div>
@@ -112,7 +121,9 @@
       ${svc ? `<div class="panel"><h3>Relevant services</h3>
         ${confirmed.length || o.scope_confirmed_note ? `<div class="callout ok"><b>Confirmed by the contact:</b> ${esc(confirmed.join(', '))}${o.scope_confirmed_note ? (confirmed.length ? '. ' : '') + esc(o.scope_confirmed_note) : ''}</div>` : ''}
         ${likely.length ? `<div class="chips" style="margin-bottom:8px">${likely.map(s => `<span class="badge outline">${esc(s)}</span>`).join('')}</div><p class="small muted" style="margin-top:-2px">Likely services, not yet confirmed with a contact.</p>` : ''}
-        ${(p.scope_evidence || []).length ? `<div class="callout"><b>The source describes:</b> ${esc(p.scope_evidence.join(', '))}. This is project scope, not a request for Speedy pricing.</div>` : ''}
+        ${documented.length ? `<div class="callout"><b>Documented in the source</b> (project scope, not a request for Speedy pricing):<ul class="evidence">${documented.map(evRow).join('')}</ul></div>` : ''}
+        ${inferred.length ? `<div class="callout dash"><b>Inferred from the project type</b> (not stated in the source):<ul class="evidence">${inferred.map(evRow).join('')}</ul></div>` : ''}
+        ${!ev.length && (p.scope_evidence || []).length ? `<div class="callout"><b>The source describes:</b> ${esc(p.scope_evidence.join(', '))}. This is project scope, not a request for Speedy pricing.</div>` : ''}
         ${o.speedy_scope ? `<div class="callout dash"><b>Our read (inferred):</b> ${esc(o.speedy_scope)}</div>` : ''}</div>` : ''}
       <div class="panel"><h3>Why it is ${esc(o.priority || 'ranked')}</h3>
         ${r.summary ? `<p class="small">${esc(r.summary)}.</p>` : ''}

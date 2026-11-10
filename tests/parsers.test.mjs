@@ -36,16 +36,19 @@ await t('FDOT payload: low bidder is marked low_bidder, never awarded; untracked
   const r = L.parseFdotReport(fx('fdot_report_08261103.html'));
   const letting = L.parseFdotList(fx('fdot_list_08.html'))[0];
   const p = L.fdotPayload(r.contracts[1], letting, '08', false);
-  assert.equal(p.winner.status, 'low_bidder'); assert.equal(p.region, 'Central FL'); assert.equal(p.relevance, 'low');
+  assert.equal(p.winner.status, 'low_bidder'); assert.equal(p.region, 'Central FL'); assert.equal(p.relevance, 'review');
   assert.match(p.status_text, /Not an award/);
   const tracked = L.fdotPayload(r.contracts[0], letting, '08', true);
   assert.equal(tracked.title, undefined, 'tracked records keep their curated title');
 });
 
 await t('Regions from counties and ZIP codes', () => {
-  assert.equal(L.regionForCounty('ORANGE'), 'Central FL'); assert.equal(L.regionForCounty('MIAMI DADE'), 'South FL');
-  assert.equal(L.regionForCounty('ST JOHNS'), 'North FL'); assert.equal(L.regionForZip('32827'), 'Central FL');
-  assert.equal(L.regionForZip('33039-1299'), 'South FL'); assert.equal(L.regionForZip(null), 'Unknown');
+  assert.equal(L.regionForCounty('ORANGE'), 'Central FL'); assert.equal(L.regionForCounty('MIAMI DADE'), 'Southeast FL');
+  assert.equal(L.regionForCounty('ST JOHNS'), 'Northeast FL'); assert.equal(L.regionForZip('32827'), 'Central FL');
+  assert.equal(L.regionForZip('33039-1299'), 'Southeast FL'); assert.equal(L.regionForZip(null), 'Unknown');
+  assert.equal(L.regionForZip('32114'), 'Central FL', 'Daytona Beach ZIPs are Central FL');
+  assert.equal(Object.values(L.REGIONS).flat().length, 67, 'all 67 counties');
+  assert.equal(L.countyForCity('Kennedy Space Center'), 'Brevard'); assert.equal(L.countyForCity('ft. lauderdale'), 'Broward');
 });
 
 await t('SAM.gov search: award notices map to the original solicitation; janitorial is skipped', () => {
@@ -116,5 +119,117 @@ if (DB) {
   });
   await c.end();
 }
+
+// ---------------------------------------------------------------- discovery: classification and new sources
+const C = (title, description, value) => L.classify([{ field: 'title', text: title }, { field: 'description', text: description || '' }], undefined, { value });
+
+await t('Scenario 1: a direct concrete cutting solicitation is high priority, documented, and Speedy bids it directly', () => {
+  const c = C('Concrete Coring and Saw Cutting Services, Building 1050', 'Provide all labor to core drill and saw cut existing slabs.');
+  assert.equal(c.relevance, 'high');
+  assert.ok(c.evidence.some(e => e.confidence === 'documented' && e.term === 'core drilling'));
+  assert.ok(c.services.includes('Core drilling') && c.services.includes('Slab sawing'));
+  const n = { id: 'a'.repeat(32), title: 'Concrete Coring and Saw Cutting Services, Building 1050', type: 'Solicitation', sol: 'N6945026Q0101', originalSol: null,
+    active: true, canceled: false, published: '2026-11-01', modified: '2026-11-01', deadline: '2099-01-15T14:00:00-05:00', agency: 'Navy', office: 'NAVFAC SE',
+    officeState: 'FL', awardee: null, awardAmount: null, snippet: 'Provide all labor to core drill and saw cut existing slabs.', parent: null };
+  const facts = L.samFacts([n], { data2: { placeOfPerformance: { city: { name: 'JACKSONVILLE' }, zip: '32212' } } });
+  const p = L.samPayload('N6945026Q0101', [n], facts, false);
+  assert.equal(p.relevance, 'high'); assert.equal(p.opportunity.approach, 'bid_direct'); assert.equal(p.county, 'Duval'); assert.equal(p.region, 'Northeast FL');
+  assert.match(p.opportunity.next_action, /submit Speedy's bid/);
+});
+
+await t('Scenario 2: a general renovation whose specifications call for sawcutting and coring is documented from the spec text', () => {
+  const c = L.classify([{ field: 'title', text: 'Building 22 Renovation' },
+    { field: 'specifications', doc: 'Section 02 41 19 Selective Demolition', page: 3,
+      text: 'The Contractor shall saw cut and remove the existing slab for new plumbing trenches. Core drill floor penetrations after GPR scanning.' }]);
+  assert.equal(c.relevance, 'high');
+  const e = c.evidence.find(x => x.term === 'saw cutting');
+  assert.equal(e.field, 'specifications'); assert.equal(e.page, 3); assert.match(e.snippet, /saw cut and remove/i);
+  assert.ok(c.evidence.some(x => x.term === 'GPR / concrete scanning'));
+});
+
+await t('Scenario 3: a bridge replacement with demolition and barrier removal points to road & bridge deconstruction', () => {
+  const c = C('SR 50 over Econlockhatchee River bridge replacement', 'Work includes removal of the existing bridge and concrete barrier wall removal.');
+  assert.equal(c.relevance, 'high');
+  assert.ok(c.services.includes('Road & bridge deconstruction'));
+  assert.equal(c.category, 'Transportation & infrastructure');
+  const title = C('SR 50 bridge replacement', '');
+  assert.equal(title.relevance, 'potential', 'project type alone is inferred, not documented');
+  assert.ok(title.evidence.every(e => e.confidence === 'inferred'));
+});
+
+const usaRow = { generated_internal_id: 'CONT_AWD_140P5326C0007_1443_-NONE-_-NONE-', 'Award ID': '140P5326C0007', 'Recipient Name': 'OAC ACTION CONSTRUCTION CORP.',
+  'Award Amount': 4957922, Description: 'AWARD TASK ORDER FOR DEMOLITION OF THE EXISTING VISITOR CENTER AND CONSTRUCTION OF A NEW CONTACT STATION',
+  'Start Date': '2026-09-22', 'Awarding Agency': 'Department of the Interior', 'Awarding Sub Agency': 'National Park Service', 'Place of Performance Zip5': '32780', NAICS: { code: '236220' } };
+await t('Scenario 4: a new federal award names the prime contractor, links to its solicitation and is routed as an awarded-project lead', () => {
+  const a = L.normalizeUsa(usaRow);
+  const cls = L.classify([{ field: 'award description', text: a.description }], undefined, { value: a.amount });
+  assert.equal(cls.relevance, 'potential');
+  const p = L.usaPayload(a, { place_of_performance: { county_name: 'BREVARD', city_name: 'TITUSVILLE', zip5: '32780' }, date_signed: '2026-09-22',
+    latest_transaction_contract_data: { solicitation_identifier: '140P5326R0003' } }, cls);
+  assert.equal(p.stage, 'awarded'); assert.equal(p.winner.status, 'awarded'); assert.equal(p.winner.name, 'Oac Action Construction Corp.');
+  assert.equal(p.county, 'Brevard'); assert.equal(p.region, 'Central FL'); assert.equal(p.solicitation_no, '140P5326R0003');
+  assert.deepEqual(p.alt_keys, ['piid:140P5326C0007']); assert.equal(p.project_value, 4957922);
+  assert.match(p.title, /^Award task order for demolition/);
+});
+
+const permitRow = { permit_number: 'BLD2026-12345', application_type: 'Building Permit', worktype: 'Alteration', permit_address: '5201 RALEIGH ST',
+  property_owner_name: 'VETERANS AFFAIRS SECRETARY', contractor: 'BERNARDO PEREZ', contractor_name: 'OHL ARELLANO CONSTRUCTION COMPANY',
+  contractor_address: '7380 WEST SAND LAKE RD,STE # 605,ORLANDO, FL 32819', contractor_phone_number: '(407)553-8900', plan_review_type: 'Commercial',
+  estimated_cost: '7000000', project_name: 'FDVA RENOVATION & RETROFIT OF LAKE BALDWIN FACILITY', application_status: 'Open', processed_date: '2026-10-20T00:00:00.000' };
+await t('Scenario 5: a private commercial permit is a potential (inferred) lead with the contractor of record to call', () => {
+  const x = L.normalizeOrlandoPermit(permitRow);
+  const cls = L.classify(L.permitSections(x, 'https://example.test'), undefined, { value: x.value });
+  assert.equal(cls.relevance, 'potential');
+  assert.ok(cls.evidence.length && cls.evidence.every(e => e.confidence === 'inferred'), 'nothing in a permit is a confirmed request');
+  assert.equal(cls.category, 'Institutional & government');
+  const p = L.permitPayload(x, cls, { city: 'Orlando', county: 'Orange', source_id: 'orlando_permits', key_prefix: 'orlando', dataset_url: 'https://data.cityoforlando.net/resource/ryhf-m453.json' });
+  assert.equal(p.external_key, 'orlando:BLD2026-12345'); assert.equal(p.stage, 'permitting'); assert.equal(p.region, 'Central FL');
+  assert.equal(p.opportunity.company_name, 'Ohl Arellano Construction Company'); assert.equal(p.opportunity.approach, 'approach_prime');
+  assert.equal(p.opportunity.company_phone, '(407)553-8900'); assert.match(p.value_label, /\$7,000,000 permit valuation/);
+  const roof = L.classify(L.permitSections({ ...x, worktype: 'Roof', project: 'REROOF OFFICE BUILDING', owner: 'ABC LLC' }, ''));
+  assert.equal(roof.relevance, 'low');
+});
+
+await t('Unrelated and non-construction records are kept out (roofing, HVAC, janitorial, design services)', () => {
+  assert.equal(C('Design build roof replacement Wilkie Ferguson Federal Building').relevance, 'low');
+  assert.equal(C('BB - Replace deteriorated AHU 21, 22, 23 and 24').relevance, 'low');
+  assert.equal(C('Janitorial services, Orlando VA Medical Center').relevance, 'low');
+  assert.equal(C('A-E services for bridge inspection', 'Architect-engineer services').relevance, 'low');
+  assert.equal(C('Janitorial and concrete core drilling services').relevance, 'high', 'a named Speedy service still counts');
+  assert.equal(C('Construction of U.S. Customs facility', '', 144_000_000).relevance, 'review', 'big jobs with no scope go to review, not the pool');
+});
+
+await t('Search terms are configurable: a manager-added term changes the result, a broken pattern is skipped', () => {
+  const custom = [...(L.classify([], undefined).evidence), { label: 'helipad', pattern: 'helipad', kind: 'direct', weight: 3, services: ['Slab sawing'] }, { label: 'bad', pattern: '(', kind: 'direct', weight: 3, services: [] }];
+  const c = L.classify([{ field: 'title', text: 'Rooftop helipad rebuild' }], custom);
+  assert.equal(c.relevance, 'high'); assert.equal(c.evidence[0].term, 'helipad');
+});
+
+await t('SAM.gov: pages are followed until the last page, and notices without a solicitation number are read by notice id', () => {
+  assert.equal(L.morePages(50, 50, 0, 4, 54), true, '"repair" had 54 results: page 2 is needed');
+  assert.equal(L.morePages(4, 50, 1, 4, 54), false);
+  assert.equal(L.morePages(50, 50, 3, 4, 900), false, 'page cap');
+  assert.equal(L.isNoticeId('6A0DEFA1AEE74F0EA5251A7E67E57587'), true); assert.equal(L.isNoticeId('W912EP26R0012'), false);
+  const n = L.normalizeDetails({ id: '6a0defa1aee74f0ea5251a7e67e57587', archived: false, cancelled: false, postedDate: '2026-08-11T19:46:51Z',
+    data2: { type: 's', title: 'SPOTFi Campus Industry Day', solicitationNumber: '', solicitation: { deadlines: {} } }, description: [{ body: '<p>MILCON projects</p>' }] });
+  assert.equal(n.type, 'Special Notice'); assert.equal(n.sol, null); assert.equal(n.snippet, 'MILCON projects');
+  const p = L.samPayload('6A0DEFA1AEE74F0EA5251A7E67E57587', [n], L.samFacts([n], null), true);
+  assert.equal(p.solicitation_no, undefined, 'a notice id is never stored as a solicitation number');
+});
+
+await t('FDOT letting results now cover all of Florida and go to review with an inferred-scope note', () => {
+  const r = L.parseFdotReport(fx('fdot_report_08261103.html'));
+  const p = L.fdotPayload(r.contracts[0], { id: '08261103', date: '11/3/2026', iso: '2026-11-03', url: 'u' }, '08', false);
+  assert.equal(p.relevance, 'review'); assert.equal(p.category, 'Transportation & infrastructure');
+  assert.equal(p.evidence[0].confidence, 'inferred');
+});
+
+await t('Next action follows the verified stage and route', () => {
+  assert.match(L.nextActionFor('low_bidder', 'approach_prime', { company: 'SUPERIOR CONSTRUCTION' }), /apparent low bidder \(award not final\)/);
+  assert.match(L.nextActionFor('bidding', 'quote_bidders', { services: ['Wall sawing'] }), /Find who is bidding/);
+  assert.match(L.nextActionFor('permitting', 'approach_prime', { company: 'X' }), /contractor of record/);
+  assert.match(L.nextActionFor('cancelled', 'watch'), /Cancelled/);
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

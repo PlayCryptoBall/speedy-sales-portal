@@ -212,7 +212,7 @@
 
   // ---------------------------------------------------------------- Sources and refreshes
   let pollTimer;
-  const SRC_TABS = [['overview', 'Overview'], ['review', 'Review queue'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
+  const SRC_TABS = [['overview', 'Overview'], ['coverage', 'Coverage'], ['review', 'Review queue'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
   P.views.sources = async (view, r) => {
     if (mgrOnly(view, 'Sources and refreshes')) return;
     P.setPage('Sources and refreshes');
@@ -223,18 +223,24 @@
     P.state.cleanup = () => clearTimeout(pollTimer);
   };
   async function loadSources(view) {
-    const s = P.state.sources = await P.rpc('sources_status');
+    const [s, d] = await Promise.all([P.rpc('sources_status'), P.rpc('discovery_overview').catch(() => null)]);
+    s.discovery = d; P.state.sources = s;
+    if ((P.state.srcTab || 'overview') === 'settings') P.state.terms = await P.rpc('service_terms_list');
     if (P.state.page !== 'sources') return;
     renderSources(view);
     clearTimeout(pollTimer);
     if (s.runs.some(x => x.status === 'running')) pollTimer = setTimeout(() => P.state.page === 'sources' && !document.querySelector('dialog[open]') && loadSources(view).catch(() => {}), 10000);
   }
-  P.act.srcTab = (el) => { P.state.srcTab = el.dataset.tab; renderSources(document.getElementById('view')); document.querySelector(`.tab[data-tab="${el.dataset.tab}"]`)?.focus(); };
+  P.act.srcTab = async (el) => {
+    P.state.srcTab = el.dataset.tab;
+    if (el.dataset.tab === 'settings' && !P.state.terms) P.state.terms = await P.rpc('service_terms_list').catch(() => null);
+    renderSources(document.getElementById('view')); document.querySelector(`.tab[data-tab="${el.dataset.tab}"]`)?.focus();
+  };
   const srcName = (id) => P.state.sources.sources.find(x => x.id === id)?.name || id;
   function renderSources(view) {
     const s = P.state.sources, tab = P.state.srcTab || 'overview';
     const running = s.runs.some(r => r.status === 'running');
-    const body = { overview: srcOverview, review: srcReview, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
+    const body = { overview: srcOverview, coverage: srcCoverage, review: srcReview, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
     view.innerHTML = `${P.pageHead({ title: 'Sources and refreshes', sub: 'Where leads come from, when they were last checked, and what changed.',
         actions: `<button class="btn" data-act="runUpkeep">Run daily upkeep</button><button class="btn primary" data-act="runRefresh" data-source="all">${P.icon('refresh')}Refresh all now</button>` })}
       ${running ? `<div class="alert info">${P.icon('refresh')}<div class="grow">A refresh is running. This page updates every 10 seconds.</div></div>` : ''}
@@ -252,23 +258,71 @@
         <div class="kpi"><div class="lbl">Older or never re-checked</div><div class="val">${fr.never + fr.older}</div><div class="sub">${fr.never} never, ${fr.older} older than 30 days</div></div>
         <div class="kpi ${fr.failed ? 'attn' : ''}"><div class="lbl">Last check failed</div><div class="val">${fr.failed}</div><div class="sub">Or no longer listed by the source</div></div></div>
       <p class="sec-note" style="margin-top:-12px">A project counts as verified only when a refresh read it successfully from its source. Failed checks never update the date.</p>
+      ${discoveryStrip(s.discovery)}
       ${sec('Sources', `<div class="card">${s.sources.map(x => `<div class="srcrow">
           <div class="name">${esc(x.name)} ${statusOf(x)}</div>
           <div class="small muted">${esc(x.coverage)}</div>
           <div class="small" style="color:var(--ink-2)">${esc(x.schedule_note)}${x.last_success_at ? ` · Last success ${esc(P.ago(x.last_success_at))}` : ''}${x.last_run_at && x.last_status !== 'success' ? ` · Last run ${esc(P.ago(x.last_run_at))}` : ''}</div>
           ${x.last_error && x.last_status !== 'success' ? `<div class="small" style="color:var(--danger)">${esc(String(x.last_error).slice(0, 200))}</div>` : ''}
+          ${srcStats(x, s.discovery)}
           ${x.access_notes ? `<details class="plain"><summary>Access notes</summary><p class="small muted" style="margin-top:6px">${esc(x.access_notes)}</p></details>` : ''}
           <div class="acts">${x.kind === 'automated' ? `<button class="btn sm" data-act="runRefresh" data-source="${x.id}">Run now</button>` : x.kind !== 'legacy' ? '<button class="btn sm" data-act="addLead">Add a find</button>' : ''}</div></div>`).join('')}</div>`,
         { note: `${auto.filter(x => x.last_status === 'success').length} of ${P.plural(auto.length, 'automated source')} working${failing.length ? `, ${failing.length} failing` : ''}${auto.some(x => !x.last_status) ? `, ${auto.filter(x => !x.last_status).length} not run yet` : ''}. Failed runs retry every hour, up to 3 times.` })}`;
   }
+  const dsrc = (d, id) => (d?.sources || []).find(x => x.id === id);
+  function srcStats(x, d) {
+    const y = dsrc(d, x.id);
+    if (!y || x.kind !== 'automated') return '';
+    const lr = y.last_run;
+    return `<div class="small muted">${lr ? `Last run looked at ${P.plural(lr.examined, 'record')}: ${lr.relevant} relevant, ${lr.discovered} new, ${lr.updated} updated${lr.merged ? `, ${lr.merged} merged` : ''}.` : 'Not run yet.'}
+      Last 30 days: ${P.plural(y.found_30d, 'new project')}, ${y.relevant_30d} with Speedy scope.</div>`;
+  }
+  function discoveryStrip(d) {
+    if (!d) return '';
+    const m = d.summary || {};
+    const cell = (v, l, attn) => `<div><div class="lbl">${esc(l)}</div><div class="val${attn ? ' attn' : ''}">${v ?? 0}</div></div>`;
+    return sec('Discovery, last 7 days', `<div class="metricgrid wide4">
+        ${cell(m.examined_7d, 'Records examined')}${cell(m.relevant_7d, 'Relevant to Speedy')}${cell(m.discovered_7d, 'New projects')}${cell(m.updated_7d, 'Projects updated')}
+        ${cell(m.merged_7d, 'Matched across sources')}${cell(m.high_7d, 'Documented scope found')}${cell(m.awards_7d, 'Relevant awards')}${cell(m.awaiting_review, 'Waiting for review', m.awaiting_review > 0)}
+        ${cell(m.duplicates_open, 'Possible duplicates', m.duplicates_open > 0)}${cell(`${m.sources_ok}/${m.sources_automated}`, 'Automated sources OK')}${cell(m.sources_errors, 'Sources with errors', m.sources_errors > 0)}${cell(m.sources_stale, 'Stale (no success in 3 days)', m.sources_stale > 0)}
+      </div>`, { note: 'Counts come from refresh runs that actually executed. A source counts as working only after it retrieved and processed records.' });
+  }
+  function srcCoverage(s) {
+    const d = s.discovery || {}, f = P.state.covRegion || '', gaps = !!P.state.covGaps;
+    const counties = (d.counties || []).filter(c => (!f || c.region === f) && (!gaps || (!c.found_90d && !c.local_sources.length)));
+    const regions = d.regions || [];
+    const statewide = (d.sources || []).filter(x => x.kind === 'automated' && !/City|county/i.test(x.geography || ''));
+    const yes = '<span class="status ok"><span class="dot ok"></span>';
+    return `${sec('What each source covers', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Source</th><th scope="col">Area</th><th scope="col">What it finds</th><th scope="col">How</th>
+        <th scope="col">Last tried</th><th scope="col">Last success</th><th class="num" scope="col">Examined</th><th class="num" scope="col">Relevant, 30 days</th><th scope="col">Status and limits</th></tr></thead><tbody>
+        ${(d.sources || []).map(x => `<tr><td><b class="strong">${esc(x.name)}</b>${x.url ? `<div class="sub"><a href="${P.url(x.url)}" target="_blank" rel="noopener">Open</a></div>` : ''}</td>
+          <td>${esc(x.geography || '')}</td><td class="small">${esc(x.project_types || '')}</td><td class="small">${esc(x.method || '')}</td>
+          <td class="nowrap">${x.last_run_at ? esc(P.ago(x.last_run_at)) : '<span class="faint">Never</span>'}</td><td class="nowrap">${x.last_success_at ? esc(P.ago(x.last_success_at)) : '<span class="faint">Never</span>'}</td>
+          <td class="num">${x.last_run ? x.last_run.examined : '<span class="faint">—</span>'}</td><td class="num">${x.kind === 'automated' ? x.relevant_30d : '<span class="faint">—</span>'}</td>
+          <td class="small">${statusOf(x)}${x.kind !== 'automated' ? `<div class="sub">${esc(String(x.access_notes || '').slice(0, 160))}${String(x.access_notes || '').length > 160 ? '…' : ''}</div>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>`, { note: 'Examined = records the last run looked at. Relevant = new projects in the last 30 days whose scope matched Speedy\'s services (documented or inferred).' })}
+      ${sec('Regions', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Region</th><th class="num" scope="col">Counties</th><th class="num" scope="col">Available leads</th><th class="num" scope="col">New projects, 30 days</th></tr></thead><tbody>
+        ${regions.map(r => `<tr><td>${esc(r.region)}</td><td class="num">${r.counties}</td><td class="num">${r.available}</td><td class="num">${r.found_30d}</td></tr>`).join('')}</tbody></table></div>`)}
+      ${sec('Counties', `<div class="row" style="margin-bottom:10px"><label class="field" style="margin:0"><span class="sr">Region</span><select data-act-change="covRegion"><option value="">All regions</option>${regions.map(r => `<option ${f === r.region ? 'selected' : ''}>${esc(r.region)}</option>`).join('')}</select></label>
+          <label class="check" style="margin:0"><input type="checkbox" data-act-change="covGaps" ${gaps ? 'checked' : ''}><span>Only counties with no records and no local source</span></label><span class="small muted grow">${counties.length} of 67</span></div>
+        <div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">County</th><th scope="col">Region</th><th class="num" scope="col">FDOT district</th><th class="num" scope="col">Projects found, 90 days</th><th class="num" scope="col">Open leads</th><th scope="col">Local source</th><th scope="col">Records came from</th></tr></thead><tbody>
+        ${counties.map(c => `<tr><td>${esc(c.county)}</td><td>${esc(c.region)}</td><td class="num">${c.fdot_district}</td><td class="num">${c.found_90d || '<span class="faint">0</span>'}</td><td class="num">${c.open_leads || '<span class="faint">0</span>'}</td>
+          <td>${c.local_sources.length ? yes + esc(c.local_sources.join(', ')) + '</span>' : '<span class="faint">None yet</span>'}</td><td class="small">${esc((c.sources_90d || []).join(', '))}</td></tr>`).join('')}</tbody></table></div>`,
+        { note: `Every county is checked by the statewide sources (${esc(statewide.map(x => x.name.replace(/ \(.*\)$/, '')).join('; '))}), which cover federal work and state road and bridge contracts. County, city, school and utility bid boards are not collected automatically yet, so local public work in counties without a local source depends on manual finds.` })}`;
+  }
+  document.addEventListener('change', (e) => {
+    const k = e.target.dataset?.actChange;
+    if (k === 'covRegion') { P.state.covRegion = e.target.value; renderSources(document.getElementById('view')); }
+    if (k === 'covGaps') { P.state.covGaps = e.target.checked; renderSources(document.getElementById('view')); }
+  });
   function srcReview(s) {
     return sec('Waiting for review', s.review.length ? `<div class="list">${s.review.map(r => `<div class="srcrow">
-        <div class="name"><a href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.title)}</a> ${ui.prio(r.priority)}</div>
+        <div class="name"><a href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.title)}</a> ${ui.prio(r.priority)} <span class="badge outline">${esc({ discovery: 'New find', duplicate: 'Possible duplicate', cancelled: 'Cancelled at source', missing: 'No longer listed' }[r.review_kind] || 'Check')}</span></div>
         <div class="small" style="color:var(--ink-2)">${esc(r.review_reason || '')}</div>
         <div class="small muted">${esc(r.ref)} · ${esc(r.owner_name || 'Unowned')} · ${esc(P.stageLabel(r.stage))} · flagged ${esc(P.ago(r.created_at))}${r.source_url ? ` · <a href="${P.url(r.source_url)}" target="_blank" rel="noopener">Source</a>` : ''}</div>
-        <div class="acts"><button class="btn sm" data-act="review" data-id="${r.id}" data-a="publish">${r.review_kind === 'discovery' ? 'Publish' : 'Keep'}</button><button class="btn sm danger" data-act="review" data-id="${r.id}" data-a="archive">Archive</button></div></div>`).join('')}</div>`
+        <div class="acts"><button class="btn sm" data-act="review" data-id="${r.id}" data-a="publish">${r.review_kind === 'discovery' ? 'Publish' : r.review_kind === 'duplicate' ? 'Keep both' : 'Keep'}</button><button class="btn sm danger" data-act="review" data-id="${r.id}" data-a="archive">Archive</button></div></div>`).join('')}</div>`
       : P.empty('Nothing to review', 'New finds and source changes that need a look show up here.', '', 'card'),
-      { n: s.review.length, note: '<b>Publish</b> puts a new find in the Available pool. <b>Keep</b> clears the flag and leaves the lead as it is. <b>Archive</b> closes it. Salespeople do not see unreviewed new finds.' });
+      { n: s.review.length, note: '<b>Publish</b> puts a new find in the Available pool. <b>Keep</b> (or <b>Keep both</b> for a possible duplicate) clears the flag and leaves the lead as it is. <b>Archive</b> closes it. Salespeople do not see unreviewed new finds.' });
   }
   function srcRuns(s) {
     const f = P.state.runFilter || 'all';
@@ -278,9 +332,9 @@
     const dur = (r) => r.finished_at ? Math.max(1, Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) + ' s' : '';
     return `<div class="row" style="margin-bottom:12px"><div class="seg" role="group" aria-label="Show runs">${[['all', 'All'], ['scheduled', 'Scheduled'], ['manual', 'Manual'], ['failed', 'Failed or partial']].map(([k, l]) => `<button data-act="runFilter" data-f="${k}" aria-pressed="${f === k}">${l}</button>`).join('')}</div>
       <span class="small muted grow">${s.runs.length ? `Last ${s.runs.length} runs. Scheduled runs come from the timer; manual runs were started from this page.` : 'No refresh has run yet.'}</span></div>
-      ${runs.length ? `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Started</th><th scope="col">Source</th><th scope="col">How</th><th scope="col">Result</th><th class="num" scope="col">Read</th><th class="num" scope="col">New</th><th class="num" scope="col">Updated</th><th class="num" scope="col">Merged</th><th class="num" scope="col">Flagged</th><th class="num" scope="col">Errors</th><th scope="col"><span class="sr">Log</span></th></tr></thead><tbody>
+      ${runs.length ? `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Started</th><th scope="col">Source</th><th scope="col">How</th><th scope="col">Result</th><th class="num" scope="col">Examined</th><th class="num" scope="col">Relevant</th><th class="num" scope="col">New</th><th class="num" scope="col">Updated</th><th class="num" scope="col">Merged</th><th class="num" scope="col">Flagged</th><th class="num" scope="col">Errors</th><th scope="col"><span class="sr">Log</span></th></tr></thead><tbody>
         ${runs.map(r => `<tr><td class="nowrap">${esc(P.dateTime(r.started_at))}<div class="sub">${esc(dur(r))}</div></td><td>${esc(srcName(r.source_id))}</td><td>${trig(r)}</td><td>${res(r)}${r.error ? `<div class="sub" title="${esc(r.error)}">${esc(String(r.error).slice(0, 60))}${String(r.error).length > 60 ? '…' : ''}</div>` : ''}</td>
-          <td class="num">${r.fetched}</td><td class="num">${r.discovered}</td><td class="num">${r.updated}</td><td class="num">${r.merged}</td><td class="num">${r.flagged}</td><td class="num">${r.errors || '<span class="faint">0</span>'}</td>
+          <td class="num">${r.examined || r.fetched}</td><td class="num">${r.relevant ?? ''}</td><td class="num">${r.discovered}</td><td class="num">${r.updated}</td><td class="num">${r.merged}</td><td class="num">${r.flagged}</td><td class="num">${r.errors || '<span class="faint">0</span>'}</td>
           <td><button class="btn sm ghost" data-act="runLog" data-id="${r.id}">Log</button></td></tr>`).join('')}</tbody></table></div>` : P.empty('No runs match', '', '', 'card')}`;
   }
   P.act.runFilter = (el) => { P.state.runFilter = el.dataset.f; renderSources(document.getElementById('view')); };
@@ -301,8 +355,48 @@
     return `<div class="card card-pad" style="max-width:640px">
       <label class="field"><span>Suggest review of claims with no activity after (days)</span><input type="number" id="st_stale" min="3" max="90" value="${esc(s.settings.stale_days?.value)}"><span class="help">${esc(s.settings.stale_days?.description || '')}</span></label>
       <label class="field"><span>Most open leads one person can hold</span><input type="number" id="st_max" min="5" max="500" value="${esc(s.settings.max_open_claims?.value)}"><span class="help">${esc(s.settings.max_open_claims?.description || '')}</span></label>
-      <button class="btn primary" data-act="saveSettings">Save settings</button></div>`;
+      <button class="btn primary" data-act="saveSettings">Save settings</button></div>
+      ${termsHtml(P.state.terms)}`;
   }
+  const KIND_LABEL = { direct: ['Documented scope', 'The source names Speedy work. Makes a lead high priority evidence.'],
+    indicator: ['Project types', 'Usually needs Speedy. Marked as inferred, never as a confirmed request.'],
+    negative: ['Lowers relevance', 'Roofing, finishes, design services and similar.'], exclude: ['Not construction', 'Dropped unless a documented term also appears.'],
+    category: ['Project category', 'Only sorts projects into categories.'] };
+  function termsHtml(list) {
+    if (!list) return '';
+    const groups = Object.keys(KIND_LABEL).map(k => [k, list.filter(t => t.kind === k)]).filter(([, l]) => l.length);
+    return sec('Search terms', `<div class="card">${groups.map(([k, l]) => `<details class="plain termgroup" ${k === 'direct' ? 'open' : ''}><summary><b class="strong">${esc(KIND_LABEL[k][0])}</b> <span class="small muted">${l.length} · ${esc(KIND_LABEL[k][1])}</span></summary>
+        <div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Name</th><th scope="col">Looks for</th><th scope="col">Services</th><th class="num" scope="col">Weight</th><th scope="col"><span class="sr">Actions</span></th></tr></thead><tbody>
+        ${l.map(t => `<tr class="${t.enabled ? '' : 'off'}"><td>${esc(t.label)}${t.enabled ? '' : ' <span class="badge later">Off</span>'}</td><td><code class="pat">${esc(t.pattern.length > 90 ? t.pattern.slice(0, 90) + '…' : t.pattern)}</code></td>
+          <td class="small">${esc((t.services || []).join(', '))}</td><td class="num">${t.weight}</td>
+          <td class="nowrap"><button class="btn sm ghost" data-act="editTerm" data-id="${t.id}">Edit</button><button class="btn sm ghost" data-act="toggleTerm" data-id="${t.id}" data-on="${t.enabled ? 0 : 1}">${t.enabled ? 'Turn off' : 'Turn on'}</button></td></tr>`).join('')}
+        </tbody></table></div></details>`).join('')}</div>`,
+      { note: 'The refreshes read these on every run. Words are matched at the start of a word and ignore capitals; separate alternatives with |. Changes apply to the next refresh, not to leads already found.',
+        tools: '<button class="btn sm" data-act="editTerm">Add a term</button>' });
+  }
+  P.act.toggleTerm = (el) => P.busy(el, async () => {
+    await P.rpc('save_service_term', { p: { id: Number(el.dataset.id), enabled: el.dataset.on === '1' } });
+    P.state.terms = await P.rpc('service_terms_list'); renderSources(document.getElementById('view'));
+    P.toast(el.dataset.on === '1' ? 'Term turned on.' : 'Term turned off. The next refresh ignores it.');
+  });
+  P.act.editTerm = (el) => {
+    const t = (P.state.terms || []).find(x => String(x.id) === el.dataset.id) || { kind: 'direct', weight: 3, services: [] };
+    P.dialog({ title: t.id ? `Edit "${t.label}"` : 'Add a search term', ok: 'Save', wide: true,
+      fields: [
+        { name: 'label', label: 'Name', value: t.label || '', required: true, help: 'Shown as the reason a lead matched, for example "core drilling".' },
+        { name: 'pattern', label: 'Words to look for', value: t.pattern || '', required: true, help: 'For example: core drill\\w*|coring|core holes?' },
+        { name: 'kind', label: 'What a match means', type: 'select', value: t.kind, required: true, options: Object.entries(KIND_LABEL).map(([k, v]) => [k, v[0]]) },
+        { name: 'weight', label: 'Weight', type: 'text', value: t.weight, help: 'Documented scope 3; project types 1 or 2; lowers relevance -1 to -3.' },
+        { name: 'services', label: 'Speedy services it points to', value: (t.services || []).join(', '), help: 'Comma separated: ' + P.SERVICES.join(', ') },
+      ],
+      onOk: async (v) => {
+        const services = v.services.split(',').map(x => x.trim()).filter(Boolean);
+        const bad = services.filter(x => !P.SERVICES.includes(x));
+        if (bad.length) throw new Error(`Not a Speedy service: ${bad.join(', ')}`);
+        await P.rpc('save_service_term', { p: { id: t.id || null, label: v.label, pattern: v.pattern, kind: v.kind, weight: v.weight === '' ? null : Number(v.weight), services } });
+        P.state.terms = await P.rpc('service_terms_list'); renderSources(document.getElementById('view')); P.toast('Search term saved.');
+      } });
+  };
   P.act.runRefresh = (btn) => P.busy(btn, async () => {
     await P.fn('refresh', { source: btn.dataset.source });
     P.toast('Refresh started. Results show here in a few minutes.');

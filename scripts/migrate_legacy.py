@@ -44,8 +44,8 @@ def qj(v):
 def ts(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat() if t else None
 
-REGION = {"Orlando": "Central FL", "Tampa": "Tampa Bay", "Jacksonville": "North FL", "Fort Myers": "Southwest FL",
-          "Fort Lauderdale": "South FL", "Panhandle": "Panhandle"}
+REGION = {"Orlando": "Central FL", "Tampa": "Tampa Bay", "Jacksonville": "Northeast FL", "Fort Myers": "Southwest FL",
+          "Fort Lauderdale": "Southeast FL", "Panhandle": "Panhandle"}
 
 # place -> (city, county). More specific names first.
 PLACES = [

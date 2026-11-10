@@ -18,8 +18,8 @@
   };
 
   // ---------------------------------------------------------------- vocabulary
-  P.REGIONS = ['Central FL', 'Tampa Bay', 'North FL', 'Southwest FL', 'South FL', 'Panhandle', 'Unknown'];
-  P.PSTAGE = { planning: 'Planning', upcoming: 'Procurement announced', bidding: 'Open for bids', bid_closed: 'Bids closed, award pending',
+  P.REGIONS = ['Central FL', 'Tampa Bay', 'Northeast FL', 'Southwest FL', 'Southeast FL', 'Panhandle', 'Unknown'];
+  P.PSTAGE = { planning: 'Planning', design: 'In design', permitting: 'Permit filed', upcoming: 'Procurement announced', bidding: 'Open for bids', bid_closed: 'Bids closed, award pending',
     low_bidder: 'Apparent low bidder (not final)', intent_to_award: 'Intended award', awarded: 'Awarded', preconstruction: 'Starting soon',
     under_construction: 'Under construction', completed: 'Completed', cancelled: 'Cancelled', unknown: 'Stage unknown' };
   P.APPROACH = {
@@ -35,7 +35,7 @@
   // how Speedy would win the work: its own bid to the agency, or as a subcontractor to whoever builds it
   P.ROUTE = { bid_direct: 'direct', plan_holders: 'sub', quote_bidders: 'sub', approach_prime: 'sub', approach_developer: 'sub', relationship: 'sub', track_award: 'watch', watch: 'watch' };
   P.KIND = { gov_bid: 'Government bid', contractor_outreach: 'Contractor outreach', private_project: 'Private project', relationship: 'Relationship' };
-  P.SERVICES = ['GPR scanning', 'Core drilling', 'Slab sawing', 'Wall sawing', 'Wire sawing', 'Chain sawing', 'Curb sawing', 'Breaking & removal', 'Diamond grinding', 'Selective demolition'];
+  P.SERVICES = ['GPR scanning', 'Core drilling', 'Slab sawing', 'Wall sawing', 'Wire sawing', 'Chain sawing', 'Hand sawing', 'Curb sawing', 'Breaking & removal', 'Road & bridge deconstruction', 'Robotic demolition', 'Selective demolition', 'Diamond grinding', 'Surface preparation'];
   P.OUTCOMES = [['reached', 'Reached them'], ['voicemail', 'Left voicemail'], ['no_answer', 'No answer'], ['wrong_number', 'Wrong number'],
     ['sent_info', 'Sent info'], ['meeting_set', 'Meeting set'], ['quote_requested', 'Asked for a quote'], ['not_interested', 'Not interested']];
   P.ACTIVE = ['claimed', 'contacted', 'qualified', 'quote_needed', 'quote_sent', 'follow_up'];
