@@ -212,7 +212,7 @@
 
   // ---------------------------------------------------------------- Sources and refreshes
   let pollTimer;
-  const SRC_TABS = [['overview', 'Overview'], ['coverage', 'Coverage'], ['review', 'Review queue'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
+  const SRC_TABS = [['overview', 'Overview'], ['coverage', 'Coverage'], ['review', 'Review queue'], ['missed', 'Missed check'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
   P.views.sources = async (view, r) => {
     if (mgrOnly(view, 'Sources and refreshes')) return;
     P.setPage('Sources and refreshes');
@@ -234,22 +234,33 @@
   P.act.srcTab = async (el) => {
     P.state.srcTab = el.dataset.tab;
     if (el.dataset.tab === 'settings' && !P.state.terms) P.state.terms = await P.rpc('service_terms_list').catch(() => null);
+    if (el.dataset.tab === 'missed' && !P.state.missedList) P.state.missedList = await P.rpc('missed_checks_list').catch(() => []);
     renderSources(document.getElementById('view')); document.querySelector(`.tab[data-tab="${el.dataset.tab}"]`)?.focus();
   };
   const srcName = (id) => P.state.sources.sources.find(x => x.id === id)?.name || id;
   function renderSources(view) {
     const s = P.state.sources, tab = P.state.srcTab || 'overview';
     const running = s.runs.some(r => r.status === 'running');
-    const body = { overview: srcOverview, coverage: srcCoverage, review: srcReview, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
+    const body = { overview: srcOverview, coverage: srcCoverage, review: srcReview, missed: srcMissed, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
     view.innerHTML = `${P.pageHead({ title: 'Sources and refreshes', sub: 'Where leads come from, when they were last checked, and what changed.',
         actions: `<button class="btn" data-act="runUpkeep">Run daily upkeep</button><button class="btn primary" data-act="runRefresh" data-source="all">${P.icon('refresh')}Refresh all now</button>` })}
       ${running ? `<div class="alert info">${P.icon('refresh')}<div class="grow">A refresh is running. This page updates every 10 seconds.</div></div>` : ''}
       ${tabsHtml('srcTab', tab, SRC_TABS.map(([k, l]) => [k, l, k === 'review' ? s.review.length : null]))}${body}`;
   }
-  const statusOf = (x) => x.kind !== 'automated' ? `<span class="status">${esc({ needs_credentials: 'Needs logins or paid access', legacy: 'One-time import', manual: 'Added by hand', paid: 'Paid service' }[x.kind] || 'Manual')}</span>`
-    : x.last_status === 'failed' ? `<span class="status fail"><span class="dot danger"></span>Last run failed${x.consecutive_failures > 1 ? ` (${x.consecutive_failures} in a row)` : ''}</span>`
-    : x.last_status === 'partial' ? '<span class="status warn"><span class="dot warm"></span>Partly worked</span>'
-    : x.last_status === 'success' ? '<span class="status ok"><span class="dot ok"></span>Working</span>' : '<span class="status"><span class="dot"></span>Not run yet</span>';
+  // Five states that are never confused: working (with or without new records), failed, not checked recently,
+  // needs a login or subscription, and configured but never successful.
+  const statusOf = (x) => {
+    if (x.kind === 'paid') return '<span class="status"><span class="dot"></span>Needs a paid subscription</span>';
+    if (x.kind === 'needs_credentials') return '<span class="status"><span class="dot"></span>Needs logins (not collected)</span>';
+    if (x.kind !== 'automated') return `<span class="status"><span class="dot"></span>${esc({ legacy: 'One-time import', manual: 'Not automated: added by hand' }[x.kind] || 'Not automated')}</span>`;
+    if (!x.enabled) return '<span class="status"><span class="dot"></span>Turned off</span>';
+    if (!x.last_success_at) return x.last_run_at ? '<span class="status fail"><span class="dot danger"></span>Configured but has never worked</span>' : '<span class="status"><span class="dot"></span>Configured, not run yet</span>';
+    if (x.last_status === 'failed') return `<span class="status fail"><span class="dot danger"></span>Last run failed${x.consecutive_failures > 1 ? ` (${x.consecutive_failures} in a row)` : ''}</span>`;
+    if (Date.now() - new Date(x.last_success_at) > 30 * 3600e3) return `<span class="status warn"><span class="dot warm"></span>Not checked since ${esc(P.ago(x.last_success_at))}</span>`;
+    if (x.last_status === 'partial') return '<span class="status warn"><span class="dot warm"></span>Partly worked</span>';
+    const lr = x.last_run;
+    return `<span class="status ok"><span class="dot ok"></span>${lr && lr.discovered === 0 && lr.updated === 0 ? 'Working, nothing new last run' : 'Working'}</span>`;
+  };
   function srcOverview(s) {
     const fr = s.freshness, auto = s.sources.filter(x => x.kind === 'automated'), failing = auto.filter(x => x.last_status === 'failed');
     return `<div class="kpis">
@@ -315,6 +326,57 @@
     if (k === 'covRegion') { P.state.covRegion = e.target.value; renderSources(document.getElementById('view')); }
     if (k === 'covGaps') { P.state.covGaps = e.target.checked; renderSources(document.getElementById('view')); }
   });
+  const CAUSE = { already_in_pipeline: 'Already in the pipeline', source_not_monitored: 'Source not monitored', access_restricted: 'Source needs a login or subscription',
+    collector_failed: 'Collector failed', source_not_refreshed: 'Source not refreshed recently', filtered_or_not_reached: 'Filtered out or not reached', not_found: 'Not found' };
+  function srcMissed() {
+    const r = P.state.missed, pr = P.state.probe, hist = P.state.missedList || [];
+    return `${sec('Check a project we may have missed', `<div class="card card-pad" style="max-width:760px">
+        <form data-form="missed" class="row" style="gap:8px;align-items:end"><label class="field grow" style="margin:0"><span>Link, solicitation or contract number, permit number, or project name</span>
+          <input type="text" name="q" required placeholder="https://sam.gov/opp/…, W912EP26B0012, BLD2026-12345" value="${esc(P.state.missedQ || '')}"></label><button class="btn primary" type="submit">Check</button></form>
+        ${r ? `<div class="probe"><div class="alert ${r.cause === 'already_in_pipeline' ? 'info' : 'warn'}">${P.icon(r.cause === 'already_in_pipeline' ? 'check' : 'info')}<div class="grow"><b>${esc(CAUSE[r.cause] || r.cause)}</b><div class="small">${esc(r.detail || '')}</div>
+            ${(r.matches || []).map(x => `<div class="small" style="margin-top:6px">${esc(x.title)} · ${esc(x.source_name || '')}${(x.opps || []).map(o => ` · <a href="#/lead/${o.id}" data-lead="${o.id}">${esc(o.ref)}</a> ${esc(P.stageLabel(o.stage))}${o.needs_review ? ' (in review)' : ''}${o.owner ? ', ' + esc(o.owner) : ''}`).join('')}</div>`).join('')}</div></div>
+          <div class="row" style="gap:8px;margin-top:10px">
+            ${r.probe_supported && r.cause !== 'already_in_pipeline' ? '<button class="btn" data-act="probeMissed">Check the record</button>' : ''}
+            ${r.cause !== 'already_in_pipeline' ? '<button class="btn ghost" data-act="addLead">Add it by hand</button><button class="btn ghost" data-act="missedNotRelevant">Not relevant</button>' : ''}</div>
+          ${pr ? `<div class="panel" style="margin-top:12px"><h3>${esc(pr.title || 'Record')}</h3>${pr.error ? `<p class="due-hot">${esc(pr.error)}</p>` : `
+            <p class="small"><b>${esc({ high: 'Confirmed relevant scope', potential: 'Strong subcontracting potential', review: 'Possible opportunity requiring review', low: 'Low relevance' }[pr.relevance] || pr.relevance)}</b>. ${esc(pr.reason || '')}</p>
+            ${(pr.would_skip || []).length ? `<p class="small">Why the collector would skip it:</p><ul class="small">${pr.would_skip.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="small">The collector would accept it; it was likely not reached yet (page or new-item limits) or arrived after the last run.</p>'}
+            ${pr.imported ? '<p class="small strong">Imported. It is in the review queue or the pool, depending on its scope.</p>' : '<button class="btn primary" data-act="importMissed">Import it</button>'}`}</div>` : ''}</div>` : ''}
+      </div>`, { note: 'Use this when you find a real Florida project the portal did not show. Each check is logged so the gaps can be fixed and added to the tests.' })}
+      ${hist.length ? sec('Recent checks', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">When</th><th scope="col">What was checked</th><th scope="col">Finding</th><th scope="col">Resolution</th><th scope="col">By</th></tr></thead><tbody>
+        ${hist.map(h => `<tr><td class="nowrap">${esc(P.ago(h.at))}</td><td class="small" style="max-width:320px;overflow-wrap:anywhere">${esc(h.input)}</td><td class="small">${esc(CAUSE[h.cause] || h.cause || '')}${h.source_name ? `<div class="sub">${esc(h.source_name)}</div>` : ''}</td><td class="small">${esc((h.resolution || '').replace(/_/g, ' '))}</td><td class="small">${esc(h.by || '')}</td></tr>`).join('')}</tbody></table></div>`) : ''}`;
+  }
+  document.addEventListener('submit', async (e) => {
+    if (e.target.dataset?.form !== 'missed') return;
+    e.preventDefault();
+    const q = new FormData(e.target).get('q');
+    const btn = e.target.querySelector('button');
+    await P.busy(btn, async () => {
+      P.state.missedQ = q; P.state.probe = null;
+      P.state.missed = await P.rpc('check_missed', { p_input: q });
+      P.state.missedList = await P.rpc('missed_checks_list');
+      renderSources(document.getElementById('view'));
+    });
+  });
+  P.act.probeMissed = (el) => P.busy(el, async () => {
+    P.state.probe = await P.fn('refresh', { source: 'probe', url: P.state.missedQ }).catch(e => ({ error: e.message }));
+    if (P.state.probe?.error && !P.state.probe.title) P.state.probe = { error: P.state.probe.error };
+    await P.rpc('resolve_missed_check', { p_id: P.state.missed.id, p: { probe: P.state.probe } });
+    renderSources(document.getElementById('view'));
+  });
+  P.act.importMissed = (el) => P.busy(el, async () => {
+    const r = await P.fn('refresh', { source: 'probe', url: P.state.missedQ, import: true });
+    if (r.error) throw new Error(r.error);
+    P.state.probe = r;
+    await P.rpc('resolve_missed_check', { p_id: P.state.missed.id, p: { resolution: 'imported', probe: r } });
+    P.state.missedList = await P.rpc('missed_checks_list');
+    P.invalidate(); renderSources(document.getElementById('view')); P.toast('Imported.');
+  });
+  P.act.missedNotRelevant = (el) => P.busy(el, async () => {
+    await P.rpc('resolve_missed_check', { p_id: P.state.missed.id, p: { resolution: 'not_relevant' } });
+    P.state.missed = null; P.state.missedList = await P.rpc('missed_checks_list');
+    renderSources(document.getElementById('view')); P.toast('Logged as not relevant.');
+  });
   function srcReview(s) {
     return sec('Waiting for review', s.review.length ? `<div class="list">${s.review.map(r => `<div class="srcrow">
         <div class="name"><a href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.title)}</a> ${ui.prio(r.priority)} <span class="badge outline">${esc({ discovery: 'New find', duplicate: 'Possible duplicate', cancelled: 'Cancelled at source', missing: 'No longer listed' }[r.review_kind] || 'Check')}</span></div>
@@ -356,7 +418,21 @@
       <label class="field"><span>Suggest review of claims with no activity after (days)</span><input type="number" id="st_stale" min="3" max="90" value="${esc(s.settings.stale_days?.value)}"><span class="help">${esc(s.settings.stale_days?.description || '')}</span></label>
       <label class="field"><span>Most open leads one person can hold</span><input type="number" id="st_max" min="5" max="500" value="${esc(s.settings.max_open_claims?.value)}"><span class="help">${esc(s.settings.max_open_claims?.description || '')}</span></label>
       <button class="btn primary" data-act="saveSettings">Save settings</button></div>
+      ${scheduleHtml(s.settings.refresh_schedule?.value)}
       ${termsHtml(P.state.terms)}`;
+  }
+  function scheduleHtml(v) {
+    if (!v) return '';
+    const t = (k, l, help) => `<label class="field"><span>${esc(l)}</span><input type="time" id="sch_${k}" value="${esc(v[k] || '')}" required><span class="help">${esc(help)}</span></label>`;
+    return sec('Refresh schedule (Eastern time)', `<div class="card card-pad" style="max-width:640px">
+      <label class="check"><input type="checkbox" id="sch_enabled" ${v.enabled === false ? '' : 'checked'}><span>Run the automatic schedule</span></label>
+      <div class="grid2" style="margin-top:10px">
+        ${t('morning', 'Morning collection', 'Every automated source refreshes.')}${t('verify', 'Check and retry', 'Anything that failed or did not finish runs again.')}
+        ${t('snapshot', 'Morning snapshot', 'Leads re-ranked and the morning data marked verified.')}${t('alert', 'Alert managers if late', 'Only when a source is still failing.')}
+        ${t('midday', 'Midday check', (v.midday_sources || []).join(', ') + '.')}${t('afternoon', 'Afternoon check', (v.afternoon_sources || []).join(', ') + '.')}
+      </div>
+      <p class="small muted">Runs on Supabase's servers, so no computer needs to be on. Times follow daylight saving time automatically. The scheduler checks every 5 minutes, so a step can start up to 5 minutes after its time.</p>
+      <button class="btn primary" data-act="saveSchedule">Save schedule</button></div>`);
   }
   const KIND_LABEL = { direct: ['Documented scope', 'The source names Speedy work. Makes a lead high priority evidence.'],
     indicator: ['Project types', 'Usually needs Speedy. Marked as inferred, never as a confirmed request.'],
@@ -416,6 +492,16 @@
     await P.rpc('resolve_review', { p_id: el.dataset.id, p_action: el.dataset.a, p_note: null });
     P.toast(el.dataset.a === 'archive' ? 'Archived.' : el.textContent.trim() === 'Publish' ? 'Published to the pool.' : 'Kept. Flag cleared.');
     P.invalidate(); await loadSources(document.getElementById('view')); P.loadBoard(true).catch(() => {});
+  });
+  P.act.saveSchedule = (el) => P.busy(el, async () => {
+    const cur = P.state.sources.settings.refresh_schedule.value, g = (k) => document.getElementById('sch_' + k).value;
+    const v = { ...cur, enabled: document.getElementById('sch_enabled').checked };
+    for (const k of ['morning', 'verify', 'snapshot', 'alert', 'midday', 'afternoon']) v[k] = g(k);
+    const m = (x) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3, 5));
+    if (!(m(v.morning) < m(v.verify) && m(v.verify) < m(v.snapshot) && m(v.snapshot) < m(v.alert))) throw new Error('Keep the morning steps in order: collection, check, snapshot, alert.');
+    await P.rpc('update_setting', { p_key: 'refresh_schedule', p_value: v });
+    P.state.sources.settings.refresh_schedule.value = v;
+    P.toast('Schedule saved. It applies from the next 5-minute check.');
   });
   P.act.saveSettings = (el) => P.busy(el, async () => {
     await P.rpc('update_setting', { p_key: 'stale_days', p_value: Number(document.getElementById('st_stale').value) });
@@ -519,6 +605,54 @@
   };
 
   // ---------------------------------------------------------------- Excel and PDF
+  // ---------------------------------------------------------------- Team report (managers)
+  P.views.reports = async (view) => {
+    P.setPage('Team report');
+    if (!P.isMgr()) { view.innerHTML = P.pageHead({ title: 'Team report' }) + P.empty('Managers only', 'Ask a manager for team numbers.'); return; }
+    const f = P.state.repF ||= { from: P.addDays(-30), to: P.todayET(), user_id: '', region: '', source_id: '' };
+    view.innerHTML = P.pageHead({ title: 'Team report' }) + P.skeleton(6);
+    const [r, t, src] = await Promise.all([P.rpc('team_report', { p: f }), P.state.team || P.rpc('team_overview'), P.state.sources || P.rpc('sources_status')]);
+    P.state.team = t;
+    if (P.state.page !== 'reports') return;
+    const tot = r.totals || {};
+    const opt = (v, cur, label) => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(label)}</option>`;
+    const people = r.people.filter(p => p.attempts || p.claimed || p.active_now || p.won || p.lost);
+    const col = (k, l) => `<th class="num" scope="col">${l}</th>`;
+    const maxA = Math.max(1, ...people.map(p => p.attempts));
+    const bar = (n, max) => `<span class="trk" style="display:block;width:80px;height:8px;background:#EEF0EE;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;background:var(--accent);width:${Math.round(100 * n / max)}%"></i></span>`;
+    view.innerHTML = `${P.pageHead({ title: 'Team report', sub: `${esc(P.date(r.from))} to ${esc(P.date(r.to))}. Activity is what people did; results are what came of it.` })}
+      <form class="report-filters" data-form="repFilter">
+        <label class="field"><span>From</span><input type="date" name="from" value="${esc(f.from)}"></label>
+        <label class="field"><span>To</span><input type="date" name="to" value="${esc(f.to)}"></label>
+        <label class="field"><span>Person</span><select name="user_id">${opt('', f.user_id, 'Everyone')}${(t.people || []).filter(p => p.active).map(p => opt(p.id, f.user_id, p.name || p.email)).join('')}</select></label>
+        <label class="field"><span>Region</span><select name="region">${opt('', f.region, 'All Florida')}${P.REGIONS.filter(x => x !== 'Unknown').map(x => opt(x, f.region, x)).join('')}</select></label>
+        <label class="field"><span>Lead source</span><select name="source_id">${opt('', f.source_id, 'All sources')}${(src.sources || []).map(x => opt(x.id, f.source_id, x.name)).join('')}</select></label>
+        <button class="btn" type="submit">Apply</button>
+      </form>
+      ${sec('Activity', `<div class="metricgrid wide4">${[['Leads claimed or assigned', tot.claimed], ['Calls, emails and visits', tot.attempts], ['Conversations', tot.conversations], ['Follow-ups scheduled', tot.follow_ups_set]]
+        .map(([l, v]) => `<div><div class="lbl">${l}</div><div class="val">${v ?? 0}</div></div>`).join('')}</div>`, { note: 'A conversation is a logged contact where someone was reached (not a no-answer, voicemail or wrong contact).' })}
+      ${sec('Results', `<div class="metricgrid wide4">${[['Quotes requested', tot.quotes_requested], ['Quotes sent', tot.quotes_sent], ['Won', tot.won], ['Lost', tot.lost]]
+        .map(([l, v]) => `<div><div class="lbl">${l}</div><div class="val">${v ?? 0}</div></div>`).join('')}</div>`,
+        { note: tot.win_rate != null ? `Win rate ${tot.win_rate}% of leads closed in this period.` : 'Win rate shows once at least 5 leads have been won or lost in the period.' })}
+      ${sec('By person', people.length ? `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Person</th>${col('', 'Claimed')}${col('', 'Contacts')}<th scope="col"><span class="sr">Contacts bar</span></th>${col('', 'Conversations')}${col('', 'Quotes req.')}${col('', 'Quotes sent')}${col('', 'Won')}${col('', 'Lost')}${col('', 'Active now')}${col('', 'Overdue now')}${col('', 'Inactive now')}</tr></thead><tbody>
+        ${people.map(p => `<tr data-person="${p.id}" class="clickable"><td><a href="#/reports?person=${p.id}" data-person="${p.id}">${esc(p.full_name || 'Unknown')}</a></td><td class="num">${p.claimed}</td><td class="num">${p.attempts}</td><td>${bar(p.attempts, maxA)}</td><td class="num">${p.conversations}</td>
+          <td class="num">${p.quotes_requested}</td><td class="num">${p.quotes_sent}</td><td class="num">${p.won}</td><td class="num">${p.lost}</td><td class="num">${p.active_now}</td><td class="num ${p.overdue_now ? 'due-hot' : ''}">${p.overdue_now}</td><td class="num ${p.inactive_now ? 'due-hot' : ''}">${p.inactive_now}</td></tr>`).join('')}
+        </tbody></table></div>` : P.empty('No activity in this period', 'Try a longer date range.', '', 'sm'),
+        { note: `"Inactive now" means an assigned lead with no logged work for ${r.stale_days} days. Leads differ in quality and timing, so compare people with care.` })}
+      ${(r.quotes_attention || []).length ? sec('Quotes that need attention', `<div class="card">${r.quotes_attention.map(q => `<div class="mini" data-lead="${q.id}"><div class="t"><a class="ell" href="#/lead/${q.id}" data-lead="${q.id}">${esc(q.title)}</a></div>
+          <div class="s">${esc(q.ref)} · ${esc(q.owner || 'Unassigned')} · ${esc(P.QUOTE_STATUS[q.quote_status] || q.quote_status)}${q.requested ? ' · requested ' + esc(P.date(q.requested)) : ''}${q.sent ? ' · sent ' + esc(P.date(q.sent)) : ''}${q.amount ? ' · ' + esc(P.money(q.amount)) : ''}</div>
+          <div class="r">${q.due ? ui.due(q.due) : ''}</div></div>`).join('')}</div>`, { n: r.quotes_attention.length, note: 'Requested two or more days ago without a price, or sent at least a week ago with no answer.' }) : ''}
+      ${(r.stage_time || []).length ? sec('Average days in each stage', `<div class="hbars">${r.stage_time.map(x => `<div class="hbar" style="grid-template-columns:150px minmax(0,1fr) 90px"><span class="lab">${esc(P.stageLabel(x.stage))}</span><span class="trk"><i style="width:${Math.min(100, Math.round(100 * x.days / Math.max(...r.stage_time.map(y => Number(y.days)), 1)))}%"></i></span><span class="v">${x.days} d <span class="faint">(${x.n})</span></span></div>`).join('')}</div>`, { note: 'From stage changes logged in this period. Small counts are not reliable.' }) : ''}
+      ${(r.by_source || []).length ? sec('By lead source', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Source</th><th class="num" scope="col">Being worked</th><th class="num" scope="col">Quoted</th><th class="num" scope="col">Won in period</th></tr></thead><tbody>
+        ${r.by_source.map(x => `<tr><td>${esc(x.source)}</td><td class="num">${x.active}</td><td class="num">${x.quotes}</td><td class="num">${x.won}</td></tr>`).join('')}</tbody></table></div>`) : ''}`;
+  };
+  document.addEventListener('submit', (e) => {
+    if (e.target.dataset?.form !== 'repFilter') return;
+    e.preventDefault();
+    P.state.repF = Object.fromEntries(new FormData(e.target));
+    P.views.reports(document.getElementById('view'));
+  });
+
   P.views.files = async (view) => {
     const mgr = P.isMgr();
     view.innerHTML = `${P.pageHead({ title: 'Excel and PDF', sub: 'Files are snapshots stamped with the time they were made. The portal stays the live record.' })}
@@ -561,10 +695,28 @@
           <label class="field"><span>Name</span><input type="text" id="me_name" value="${esc(m.full_name)}" autocomplete="name"></label>
           <label class="field"><span>Mobile number</span><input type="tel" id="me_phone" value="${esc(m.phone || '')}" autocomplete="tel"><span class="help">Managers use it to text you invite and reset links.</span></label>
           <button class="btn primary" data-act="saveMe">Save changes</button></section>
+        <section class="card card-pad"><div class="sec-head"><h2>My territory and services</h2></div>
+          <p class="small muted" style="margin-top:-6px">Used for your morning briefing and Hot lead list. You still see leads from all of Florida.</p>
+          <div class="lbl">Territory</div><div class="chips" style="margin-bottom:14px">${P.REGIONS.filter(x => x !== 'Unknown').map(x => `<button type="button" class="chip" data-act="toggleChip" data-pref="territory" data-v="${esc(x)}" aria-pressed="${(m.prefs?.territory || ['Central FL']).includes(x)}">${esc(x)}</button>`).join('')}</div>
+          <div class="lbl">Services I sell most</div><div class="chips" style="margin-bottom:14px">${P.SERVICES.map(x => `<button type="button" class="chip" data-act="toggleChip" data-pref="services" data-v="${esc(x)}" aria-pressed="${(m.prefs?.services || []).includes(x)}">${esc(x)}</button>`).join('')}</div>
+          <div class="lbl">Notifications</div>
+          ${[['follow_ups', 'Follow-up and stalled-lead reminders'], ['assignments', 'Leads assigned to me and manager updates'], ['deadlines', 'Bid deadlines coming up'], ['updates', 'Source changes, awards and watched projects or companies'], m.role === 'manager' && ['discoveries', 'New finds and the daily review summary']].filter(Boolean)
+            .map(([k, l]) => `<label class="check"><input type="checkbox" data-notify="${k}" ${m.prefs?.notify?.[k] === false ? '' : 'checked'}><span>${esc(l)}</span></label>`).join('')}
+          <p class="small faint" style="margin:6px 0 12px">Refresh failures and the 6 AM data alert always reach managers.</p>
+          <button class="btn primary" data-act="savePrefs">Save preferences</button></section>
         <section class="card card-pad"><div class="sec-head"><h2>Sign-in</h2></div>
           <div class="row"><button class="btn" data-act="changePw">Change password</button><button class="btn danger" data-act="signOut">${P.icon('logout')}Sign out</button></div></section>
       </div>`;
   };
+  P.act.savePrefs = (el) => P.busy(el, async () => {
+    const pick = (k) => [...document.querySelectorAll(`[data-pref="${k}"][aria-pressed="true"]`)].map(b => b.dataset.v);
+    const territory = pick('territory');
+    if (!territory.length) throw new Error('Pick at least one region for your territory.');
+    const notify = Object.fromEntries([...document.querySelectorAll('[data-notify]')].map(i => [i.dataset.notify, i.checked]));
+    const r = await P.rpc('update_my_prefs', { p: { territory, services: pick('services'), notify } });
+    P.state.me = { ...P.state.me, prefs: r.prefs }; P.state.briefing = null;
+    P.toast('Preferences saved.');
+  });
   P.act.saveMe = (el) => P.busy(el, async () => {
     P.state.me = { ...P.state.me, ...(await P.rpc('update_my_profile', { p_full_name: document.getElementById('me_name').value, p_phone: document.getElementById('me_phone').value })) };
     document.querySelectorAll('.sb-user .who b').forEach(b => { b.textContent = P.state.me.full_name || P.state.me.email; });

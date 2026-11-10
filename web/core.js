@@ -36,8 +36,10 @@
   P.ROUTE = { bid_direct: 'direct', plan_holders: 'sub', quote_bidders: 'sub', approach_prime: 'sub', approach_developer: 'sub', relationship: 'sub', track_award: 'watch', watch: 'watch' };
   P.KIND = { gov_bid: 'Government bid', contractor_outreach: 'Contractor outreach', private_project: 'Private project', relationship: 'Relationship' };
   P.SERVICES = ['GPR scanning', 'Core drilling', 'Slab sawing', 'Wall sawing', 'Wire sawing', 'Chain sawing', 'Hand sawing', 'Curb sawing', 'Breaking & removal', 'Road & bridge deconstruction', 'Robotic demolition', 'Selective demolition', 'Diamond grinding', 'Surface preparation'];
-  P.OUTCOMES = [['reached', 'Reached them'], ['voicemail', 'Left voicemail'], ['no_answer', 'No answer'], ['wrong_number', 'Wrong number'],
-    ['sent_info', 'Sent info'], ['meeting_set', 'Meeting set'], ['quote_requested', 'Asked for a quote'], ['not_interested', 'Not interested']];
+  P.OUTCOMES = [['spoke', 'Spoke with contractor'], ['no_answer', 'No answer'], ['voicemail', 'Left voicemail'], ['call_back', 'Call back later'],
+    ['requested_info', 'Requested information'], ['interested', 'Interested'], ['quote_requested', 'Quote requested'], ['not_interested', 'Not interested'], ['wrong_contact', 'Wrong contact']];
+  P.OUTCOME_LABEL = Object.fromEntries(P.OUTCOMES.concat([['reached', 'Spoke with them'], ['wrong_number', 'Wrong contact'], ['sent_info', 'Sent info'], ['meeting_set', 'Meeting set']]));
+  P.QUOTE_STATUS = { requested: 'Requested', in_progress: 'Being priced', sent: 'Sent', accepted: 'Accepted', declined: 'Declined', no_response: 'No response yet' };
   P.ACTIVE = ['claimed', 'contacted', 'qualified', 'quote_needed', 'quote_sent', 'follow_up'];
   P.CLOSED = ['won', 'lost', 'disqualified', 'archived'];
   P.WINNER_STAGES = ['low_bidder', 'intent_to_award', 'awarded', 'preconstruction', 'under_construction'];
@@ -399,18 +401,21 @@
   // open a lead or person over the current page; the address keeps the page underneath so Back closes it
   P.openPanel = (param, id) => {
     const r = P.parseHash();
-    const q = new URLSearchParams(r.params); q.delete('lead'); q.delete('person'); q.set(param, id);
+    const q = new URLSearchParams(r.params); q.delete('lead'); q.delete('person'); q.delete('company'); q.set(param, id);
     const h = '#/' + (r.path || 'today') + '?' + q;
-    if (r.params.lead || r.params.person) { history.replaceState(null, '', h); P.route(); }
+    if (r.params.lead || r.params.person || r.params.company) { history.replaceState(null, '', h); P.route(); }
     else { P.state.drawerPushed = true; location.hash = h; }
   };
   P.openLead = (id) => P.openPanel('lead', id);
   P.openPerson = (id) => P.openPanel('person', id);
+  P.openCompany = (id) => P.openPanel('company', id);
+  // open a lead straight on its Activity tab, ready to log a call
+  P.act.logCall = (el) => { P.state.nextLeadTab = 'activity'; P.openLead(el.dataset.id); };
   P.closeDrawer = () => {
     const r = P.parseHash();
-    if (r.params.lead || r.params.person) {
+    if (r.params.lead || r.params.person || r.params.company) {
       if (P.state.drawerPushed) { P.state.drawerPushed = false; history.back(); return; }
-      const q = new URLSearchParams(r.params); q.delete('lead'); q.delete('person');
+      const q = new URLSearchParams(r.params); q.delete('lead'); q.delete('person'); q.delete('company');
       const s = q.toString();
       history.replaceState(null, '', '#/' + r.path + (s ? '?' + s : ''));
       P.route();
@@ -432,11 +437,11 @@
       ['Government', [['gov', 'Gov contracts', 'gov']]],
       mgr && ['Management', [['team', 'Team', 'team'], ['users', 'People and access', 'users']]],
       mgr && ['Data and system', [['sources', 'Sources and refreshes', 'sources']]],
-      ['Reports', [['files', 'Excel and PDF', 'files']]],
+      ['Reports', [mgr && ['reports', 'Team report', 'flag'], ['files', 'Excel and PDF', 'files']]],
     ].filter(Boolean).map(([g, items]) => [g, items.filter(Boolean)]);
   };
   P.TITLES = { today: 'Today', pool: 'Available', mine: 'My pipeline', all: 'All leads', gov: 'Gov contracts', team: 'Team', users: 'People and access',
-    sources: 'Sources and refreshes', files: 'Excel and PDF', me: 'My account', more: 'More', print: 'Print' };
+    sources: 'Sources and refreshes', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
   P.renderShell = () => {
     const me = P.state.me, collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
     const link = ([k, label, icon]) => `<a class="sb-link" href="#/${k}" data-nav="${k}" title="${esc(label)}">${P.icon(icon)}<span class="txt">${esc(label)}</span><span class="sb-count" data-count="${k}"></span></a>`;
@@ -503,7 +508,25 @@
     document.querySelectorAll('[data-mcount="today"]').forEach(el => { el.textContent = c.due; el.classList.toggle('hidden', !c.due); });
   };
   // "Updated 2 min ago" with a refresh button, shown on data pages
-  P.syncHtml = () => `<span class="sync" id="sync">${P.state.boardErr ? `<span class="due-hot">Offline copy from ${esc(P.ago(P.state.boardAt))}</span>` : `<span>Updated ${esc(P.ago(P.state.boardAt) || 'just now')}</span>`}<button data-act="refreshBoard" aria-label="Refresh data" title="Refresh">${P.icon('refresh', 'sm')}</button></span>`;
+  const freshText = () => {
+    const f = P.state.fresh;
+    if (!f || !f.verified_at) return f && f.last_success_at ? `Sources checked ${P.ago(f.last_success_at)}` : 'Not refreshed yet';
+    const t = new Date(f.verified_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+    const day = f.day === P.todayET() ? '' : ' ' + P.date(f.verified_at);
+    if (f.status === 'ready') return `Data verified ${t}${day} ET`;
+    const late = f.sources_total - f.sources_ok;
+    return `${late} of ${f.sources_total} source${f.sources_total === 1 ? '' : 's'} delayed · checked ${t}${day}`;
+  };
+  P.syncHtml = () => `<span class="sync${P.state.fresh && P.state.fresh.status && P.state.fresh.status !== 'ready' ? ' warn' : ''}" id="sync">${P.state.boardErr ? `<span class="due-hot">Offline copy from ${esc(P.ago(P.state.boardAt))}</span>`
+    : `<button class="linklike" data-act="freshInfo" aria-label="Data freshness details">${esc(freshText())}</button>`}<button data-act="refreshBoard" aria-label="Reload leads" title="Reload leads">${P.icon('refresh', 'sm')}</button></span>`;
+  P.loadFresh = async () => { try { P.state.fresh = await P.rpc('data_freshness'); P.updateSync(); } catch { /* the indicator is optional */ } };
+  P.act.freshInfo = (el) => {
+    const f = P.state.fresh || {};
+    P.popover(el, `<div class="pop-body"><b class="strong">Morning data</b>
+      <p class="small muted" style="margin:4px 0 8px">The portal collects from every source at 4:15 AM Eastern, retries anything that failed, and verifies by 5:30 AM. This shows when each source last refreshed successfully.</p>
+      <ul class="plain-list">${(f.sources || []).map(x => `<li><span class="dot ${x.ok ? 'ok' : 'warm'}"></span> ${esc(x.name)} <span class="small faint">${x.last_success_at ? esc(P.ago(x.last_success_at)) : 'never'}</span></li>`).join('')}</ul>
+      ${P.isMgr() ? '<a class="btn sm" href="#/sources?tab=overview" style="margin-top:8px">Source details</a>' : ''}</div>`);
+  };
   P.updateSync = () => { const s = document.getElementById('sync'); if (s) s.outerHTML = P.syncHtml(); };
   setInterval(() => P.state.board && P.updateSync(), 30000);
   P.act.refreshBoard = async (el) => {
@@ -522,12 +545,14 @@
   };
   P.go = (hash) => { if (location.hash === hash) P.route({ force: true }); else location.hash = hash; };
   let curKey = null;
-  const viewKey = (r) => r.path + '?' + new URLSearchParams(Object.entries(r.params).filter(([k]) => k !== 'lead' && k !== 'person'));
+  const PANEL_KEYS = ['lead', 'person', 'company'];
+  const viewKey = (r) => r.path + '?' + new URLSearchParams(Object.entries(r.params).filter(([k]) => !PANEL_KEYS.includes(k)));
   // a view that consumed its start-up parameters (e.g. ?priority=Hot) drops them from the address
   P.cleanHash = () => {
     const r = P.parseHash(), keep = new URLSearchParams();
     if (r.params.lead) keep.set('lead', r.params.lead);
     if (r.params.person) keep.set('person', r.params.person);
+    if (r.params.company) keep.set('company', r.params.company);
     const s = keep.toString();
     history.replaceState(null, '', '#/' + r.path + (s ? '?' + s : ''));
     curKey = r.path + '?';
@@ -556,14 +581,15 @@
       });
       if (pageChanged) window.scrollTo(0, 0);
       const fn = P.views[r.name];
-      const vp = { ...r, params: Object.fromEntries(Object.entries(r.params).filter(([k]) => k !== 'lead' && k !== 'person')) };
+      const vp = { ...r, params: Object.fromEntries(Object.entries(r.params).filter(([k]) => !PANEL_KEYS.includes(k))) };
       rendering = fn
         ? Promise.resolve().then(() => fn(view, vp)).catch(e => { console.error(e); view.innerHTML = P.pageHead({ title: P.TITLES[r.name] || 'Speedy' }) + P.errorState(e.message); })
         : Promise.resolve(view.innerHTML = P.pageHead({ title: 'Page not found' }) + P.empty('Page not found', 'That address does not match a page in the portal.', '<a class="btn" href="#/today">Go to Today</a>'));
     }
-    if (r.params.lead && P.showLead) P.showLead(r.params.lead);
+    if (r.params.lead && P.showLead) { const tab = P.state.nextLeadTab; P.state.nextLeadTab = null; P.showLead(r.params.lead, tab ? { tab } : {}); }
     else if (r.params.person && P.showPerson) P.showPerson(r.params.person);
-    else { P.state.drawerPushed = false; if (D.open && (D.kind === 'lead' || D.kind === 'person')) D.hide(); }
+    else if (r.params.company && P.showCompany) P.showCompany(r.params.company);
+    else { P.state.drawerPushed = false; if (D.open && ['lead', 'person', 'company'].includes(D.kind)) D.hide(); }
     await rendering;
   };
   P.act.retry = () => { P.invalidate(); P.route({ force: true }); };
@@ -572,11 +598,11 @@
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]');
     if (el) { const f = P.act[el.dataset.act]; if (f) { e.preventDefault(); f(el, e); } return; }
-    const row = e.target.closest('[data-lead],[data-person]');
+    const row = e.target.closest('[data-lead],[data-person],[data-company]');
     if (row && (row === e.target.closest('a,button,input,select,textarea,label') || !e.target.closest('a,button,input,select,textarea,label'))) {
       if (e.metaKey || e.ctrlKey || e.shiftKey) return;   // let modified clicks open a new tab
       e.preventDefault();
-      if (row.dataset.lead) P.openLead(row.dataset.lead); else P.openPerson(row.dataset.person);
+      if (row.dataset.lead) P.openLead(row.dataset.lead); else if (row.dataset.company) P.openCompany(row.dataset.company); else P.openPerson(row.dataset.person);
     }
   });
   document.addEventListener('keydown', (e) => {

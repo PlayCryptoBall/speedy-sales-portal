@@ -231,6 +231,7 @@
       <div class="toolbar">
         <label class="search-box">${P.icon('search')}<span class="sr">Search</span><input type="search" data-lf="q" value="${esc(f.q || '')}" placeholder="Search company, project, contact, solicitation #" autocomplete="off"></label>
         <button class="btn" data-act="openFilters" aria-haspopup="dialog" aria-expanded="false" id="lv-fbtn">${P.icon('filter')}Filters</button>
+        <button class="btn" data-act="savedMenu" aria-haspopup="menu">${P.icon('flag')}Saved</button>
         <label class="sr" for="lv-sort">Sort by</label>
         <select class="sort" id="lv-sort" data-lf="sort">${L.sorts.map(s => `<option value="${s}" ${(f.sort || L.sort) === s ? 'selected' : ''}>${esc(SORT_LABEL[s])}</option>`).join('')}</select>
         <div class="sp desk-only"></div>
@@ -242,6 +243,25 @@
       <div id="lv-results"></div>`;
     renderResults();
   }
+
+  // saved searches: personal filter combinations per list
+  P.act.savedMenu = async (el) => {
+    const key = P.state.curList;
+    if (!P.state.saved) P.state.saved = await P.rpc('my_saved_searches').catch(() => []);
+    const mine = P.state.saved.filter(x => x.list === key);
+    const save = () => P.dialog({ title: 'Save this search', ok: 'Save', fields: [{ name: 'name', label: 'Name', required: true, placeholder: 'Central FL bridge work' }],
+      onOk: async (v) => {
+        const params = { ...st() }; delete params.limit;
+        await P.rpc('save_search', { p_list: key, p_name: v.name, p_params: params });
+        P.state.saved = await P.rpc('my_saved_searches');
+      } }).then(v => v && P.toast('Search saved. Find it under Saved.'));
+    P.menu(el, [
+      ...mine.map(x => ({ label: x.name, icon: 'filter', run: () => { P.state.filters[key] = { ...x.params, limit: 0 }; renderListPage(document.getElementById('view'), key); } })),
+      mine.length && '-',
+      { label: 'Save current search…', icon: 'plus', run: save },
+      ...mine.map(x => ({ label: `Delete "${x.name}"`, icon: 'x', danger: true, run: async () => { await P.rpc('delete_search', { p_id: x.id }); P.state.saved = await P.rpc('my_saved_searches'); P.toast('Deleted.'); } })),
+    ].filter(Boolean), { label: 'Saved searches' });
+  };
 
   function renderResults() {
     const key = P.state.curList, L = LISTS[key], f = st();
@@ -416,60 +436,122 @@
   const card = (id, title, n, body, tools = '') => `<section class="card" id="${id}" aria-labelledby="${id}-h"><div class="sec-head"><h2 id="${id}-h">${esc(title)}${n != null ? ` <span class="n">${n}</span>` : ''}</h2><div class="tools">${tools}</div></div>${body}</section>`;
   const viewAll = (href, label = 'View all') => `<a class="btn ghost sm" href="${href}">${esc(label)}${P.icon('right', 'sm')}</a>`;
 
+  const callBtn = (r) => `<button class="btn sm" data-act="logCall" data-id="${r.id}">${P.icon('phone', 'sm')}Log call</button>`;
+  // The work queue: each group appears only when it has something in it, most urgent first.
+  function workQueue(board, uid) {
+    const today = P.todayET(), my = board.filter(r => r.owner_id === uid && P.ACTIVE.includes(r.stage));
+    const used = new Set(), take = (rows) => rows.filter(r => !used.has(r.id) && used.add(r.id));
+    const quoteDue = (r) => (r.quote_status === 'requested' && r.quote_requested_at && r.quote_requested_at <= P.addDays(-2))
+      || (['sent', 'no_response'].includes(r.quote_status) && (r.next_action_due ? r.next_action_due <= today : (r.quote_sent_at && r.quote_sent_at <= P.addDays(-7))));
+    return [
+      ['overdue', 'Overdue follow-ups', take(my.filter(r => r.next_action_due && r.next_action_due < today).sort(SORTS.urgency)), (r) => ui.due(r.next_action_due)],
+      ['today', 'Follow-ups due today', take(my.filter(r => r.next_action_due === today).sort(SORTS.priority)), () => '<span class="badge warm">Today</span>'],
+      ['first', 'Waiting for a first conversation', take(my.filter(r => r.stage === 'claimed').sort(SORTS.priority)),
+        (r) => r.last_activity_summary ? `<span class="small muted">${esc(r.last_activity_summary)}</span>` : '<span class="small muted">Not called yet</span>'],
+      ['quotes', 'Quotes to chase', take(my.filter(quoteDue)), (r) => `<span class="small">${r.quote_status === 'requested' ? 'Requested ' + esc(P.date(r.quote_requested_at)) : 'Sent ' + esc(P.date(r.quote_sent_at || r.next_action_due))}</span>`],
+      ['deadline', 'Deadlines on your leads', take(my.filter(r => P.isOpenBid(r) && P.dayDiff(r.deadline) <= 7).sort(SORTS.deadline)), (r) => `<span class="small due-hot">${esc(P.date(r.deadline))}</span>`],
+      ['stale', 'No recent activity', take(my.filter(r => r.stale)), (r) => `<span class="small muted">Last touch ${esc(P.ago(r.last_activity_at || r.claimed_at))}</span>`],
+    ].filter(([, , rows]) => rows.length);
+  }
+  function briefingHtml(b) {
+    if (!b) return '';
+    const sn = b.snapshot, line = [];
+    if (b.my_overdue) line.push(`<b>${b.my_overdue}</b> overdue follow-up${b.my_overdue === 1 ? '' : 's'}`);
+    if (b.my_due_today) line.push(`<b>${b.my_due_today}</b> due today`);
+    if (b.my_quote_followups) line.push(`<b>${b.my_quote_followups}</b> quote${b.my_quote_followups === 1 ? '' : 's'} waiting on an answer`);
+    if (b.my_changes) line.push(`<b>${b.my_changes}</b> of your projects changed at the source`);
+    if (b.my_deadlines.length) line.push(`<b>${b.my_deadlines.length}</b> deadline${b.my_deadlines.length === 1 ? '' : 's'} this week`);
+    const terr = (b.territory || []).join(', ');
+    const finds = [];
+    if (b.new_hot.length) finds.push(`<a href="#/pool?priority=Hot&sort=newest"><b>${b.new_hot.length}</b> new Hot lead${b.new_hot.length === 1 ? '' : 's'} in ${esc(terr)}</a>${b.new_hot_elsewhere ? ` (+${b.new_hot_elsewhere} elsewhere in Florida)` : ''}`);
+    else if (b.new_hot_elsewhere) finds.push(`<a href="#/pool?priority=Hot&sort=newest"><b>${b.new_hot_elsewhere}</b> new Hot lead${b.new_hot_elsewhere === 1 ? '' : 's'} outside ${esc(terr)}</a>`);
+    if (b.new_awards.length) finds.push(`<a href="#/pool?sort=newest"><b>${b.new_awards.length}</b> new contractor award${b.new_awards.length === 1 ? '' : 's'} to call</a>`);
+    if (b.new_matching) finds.push(`<b>${b.new_matching}</b> new lead${b.new_matching === 1 ? '' : 's'} for your services`);
+    const t = b.team, team = [];
+    if (t) {
+      if (t.new_relevant) team.push(`<b>${t.new_relevant}</b> relevant project${t.new_relevant === 1 ? '' : 's'} found`);
+      if (t.new_awards) team.push(`<b>${t.new_awards}</b> award${t.new_awards === 1 ? '' : 's'} posted`);
+      if (t.awaiting_review) team.push(`<a href="#/sources?tab=review"><b>${t.awaiting_review}</b> waiting for your review</a>`);
+      if (t.unowned_hot) team.push(`<a href="#/pool?priority=Hot"><b>${t.unowned_hot}</b> Hot unclaimed</a>`);
+      const od = (t.overdue_by_person || []).reduce((n, x) => n + x.n, 0);
+      if (od) team.push(`<b>${od}</b> team follow-up${od === 1 ? '' : 's'} overdue`);
+      if ((t.failed_sources || []).length) team.push(`<span class="due-hot">${esc(t.failed_sources.join(', '))} did not refresh</span>`);
+    }
+    const ok = sn ? `${sn.sources_ok} of ${sn.sources_total} sources refreshed${sn.verified_at ? ' and verified ' + esc(new Date(sn.verified_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })) : ''}` : '';
+    const empty = !finds.length && !team.length;
+    return `<section class="card card-pad briefing" aria-label="Morning briefing">
+      <div class="row" style="justify-content:space-between;gap:8px"><h2 class="h3" style="margin:0">Morning briefing</h2><span class="small faint">${esc(ok)}</span></div>
+      ${line.length ? `<p class="brief-line">${line.join(' · ')}</p>` : ''}
+      ${finds.length ? `<p class="brief-line">${finds.join(' · ')}</p>` : ''}
+      ${team.length ? `<p class="brief-line"><span class="muted">Team:</span> ${team.join(' · ')}</p>` : ''}
+      ${empty ? `<p class="brief-line muted">No new qualifying leads or awards since yesterday morning${sn && sn.sources_ok ? ` from the ${sn.sources_ok} source${sn.sources_ok === 1 ? '' : 's'} that refreshed successfully` : ''}.</p>` : ''}
+    </section>`;
+  }
+
   function renderToday(view) {
-    const board = P.state.board || [], today = P.todayET(), my = board.filter(r => r.owner_id === me().id && P.ACTIVE.includes(r.stage));
-    const overdue = my.filter(r => r.next_action_due && r.next_action_due < today).sort(SORTS.urgency);
-    const dueToday = my.filter(r => r.next_action_due === today);
-    const stale = my.filter(r => r.stale && !overdue.includes(r) && !dueToday.includes(r));
-    const flagged = my.filter(r => r.needs_review && !overdue.includes(r) && !dueToday.includes(r) && !stale.includes(r));
-    const attention = [...overdue, ...dueToday, ...stale, ...flagged];
-    const soon = my.filter(r => r.next_action_due && r.next_action_due > today && r.next_action_due <= P.addDays(7)).sort(SORTS.urgency);
-    const priorities = [...attention, ...soon];
-    const deadlines = board.filter(r => P.isOpenBid(r) && P.dayDiff(r.deadline) <= 7 && (r.owner_id === me().id || (r.stage === 'available' && !r.needs_review))).sort(SORTS.deadline);
+    const board = P.state.board || [], uid = me().id, mgr = P.isMgr(), today = P.todayET();
+    const my = board.filter(r => r.owner_id === uid && P.ACTIVE.includes(r.stage));
+    const groups = workQueue(board, uid);
+    const queueCount = groups.reduce((n, g) => n + g[2].length, 0);
     const pool = board.filter(r => r.stage === 'available' && !r.needs_review);
     const hotAll = pool.filter(r => r.priority === 'Hot').sort(SORTS.priority);
-    const notes = P.state.notes || [];
-    const quotes = my.filter(r => ['quote_needed', 'quote_sent'].includes(r.stage)).length;
-    const why = [overdue.length && `${overdue.length} overdue`, dueToday.length && `${dueToday.length} due today`, stale.length && `${stale.length} stalled`, flagged.length && `${flagged.length} flagged by a refresh`].filter(Boolean).join(' · ');
-    const nextDl = deadlines[0];
-    const central = hotAll.filter(r => r.region === 'Central FL').length;
+    const terr = (P.state.me.prefs?.territory || ['Central FL']);
+    const hotMine = hotAll.filter(r => terr.includes(r.region));
+    const deadlines = board.filter(r => P.isOpenBid(r) && P.dayDiff(r.deadline) <= 7 && (r.owner_id === uid || (r.stage === 'available' && !r.needs_review))).sort(SORTS.deadline);
     const dateLine = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+    const notes = P.state.notes || [];
 
-    const kpis = `<div class="kpis">
-      <button class="kpi ${attention.length ? 'attn' : ''}" data-act="jump" data-to="sec-pri"><div class="lbl">Needs attention</div><div class="val">${attention.length}</div><div class="sub">${esc(why || 'You are caught up')}</div></button>
-      <a class="kpi" href="#/mine"><div class="lbl">My active leads</div><div class="val">${my.length}</div><div class="sub">${quotes ? `${P.plural(quotes, 'quote')} in progress` : my.length ? `${my.filter(r => r.stage === 'claimed').length} not contacted yet` : 'Claim one from Available'}</div></a>
-      <button class="kpi ${nextDl && P.dayDiff(nextDl.deadline) <= 2 ? 'attn' : ''}" data-act="jump" data-to="sec-dl"><div class="lbl">Deadlines in 7 days</div><div class="val">${deadlines.length}</div><div class="sub">${nextDl ? `Next: ${esc(P.date(nextDl.deadline))}, ${esc(P.rel(P.dayDiff(nextDl.deadline)))}` : 'None this week'}</div></button>
-      <a class="kpi" href="#/pool?priority=Hot"><div class="lbl">Hot leads to claim</div><div class="val">${hotAll.length}</div><div class="sub">${hotAll.length ? `${central} in Central FL` : 'None in the pool right now'}</div></a></div>`;
+    let kpis;
+    if (mgr) {
+      const active = board.filter(r => P.ACTIVE.includes(r.stage));
+      const review = board.filter(r => r.needs_review).length;
+      const teamOverdue = active.filter(r => r.next_action_due && r.next_action_due < today).length;
+      const newToday = board.filter(r => r.created_at && r.created_at.slice(0, 10) >= P.addDays(-1) && !r.needs_review && r.stage === 'available').length;
+      kpis = `<div class="kpis">
+        <a class="kpi ${hotAll.length ? 'attn' : ''}" href="#/pool?priority=Hot"><div class="lbl">Hot leads nobody owns</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a>
+        <a class="kpi ${review ? 'attn' : ''}" href="#/sources?tab=review"><div class="lbl">Waiting for your review</div><div class="val">${review}</div><div class="sub">New finds salespeople cannot see yet</div></a>
+        <a class="kpi ${teamOverdue ? 'attn' : ''}" href="#/team?tab=accountability"><div class="lbl">Team follow-ups overdue</div><div class="val">${teamOverdue}</div><div class="sub">Across ${P.plural(new Set(active.filter(r => r.next_action_due && r.next_action_due < today).map(r => r.owner_id)).size, 'person', 'people')}</div></a>
+        <a class="kpi" href="#/all?tab=claimed"><div class="lbl">Leads being worked</div><div class="val">${active.length}</div><div class="sub">${newToday ? `${newToday} new in the pool since yesterday` : 'No new pool leads since yesterday'}</div></a></div>`;
+    } else {
+      kpis = `<div class="kpis">
+        <button class="kpi ${queueCount ? 'attn' : ''}" data-act="jump" data-to="sec-calls"><div class="lbl">Calls and follow-ups</div><div class="val">${queueCount}</div><div class="sub">${groups.length ? esc(groups.slice(0, 2).map(g => `${g[2].length} ${g[1].toLowerCase()}`).join(' · ')) : 'You are caught up'}</div></button>
+        <a class="kpi" href="#/mine"><div class="lbl">My active leads</div><div class="val">${my.length}</div><div class="sub">${my.filter(r => ['quote_needed', 'quote_sent'].includes(r.stage)).length} at the quote stage</div></a>
+        <button class="kpi ${deadlines[0] && P.dayDiff(deadlines[0].deadline) <= 2 ? 'attn' : ''}" data-act="jump" data-to="sec-dl"><div class="lbl">Deadlines in 7 days</div><div class="val">${deadlines.length}</div><div class="sub">${deadlines[0] ? `Next: ${esc(P.date(deadlines[0].deadline))}` : 'None this week'}</div></button>
+        <a class="kpi" href="#/pool?priority=Hot"><div class="lbl">Hot leads to claim</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a></div>`;
+    }
 
-    const mgrQueue = P.isMgr() ? (() => {
-      const q = board.filter(r => r.stage === 'quote_needed'), rv = board.filter(r => r.needs_review), stl = board.filter(r => r.stale);
-      const item = (href, n, label) => `<a href="${href}" class="row" style="gap:6px;color:var(--ink);text-decoration:none"><b style="font-size:15px">${n}</b><span class="muted">${esc(label)}</span>${P.icon('right', 'sm')}</a>`;
-      return `<div class="card card-pad row" style="gap:10px 28px;margin:-8px 0 24px"><span class="small strong" style="color:var(--ink-2)">Team queue</span>
-        ${item('#/all?stage=quote_needed&tab=all', q.length, q.length === 1 ? 'quote requested' : 'quotes requested')}${item('#/sources?tab=review', rv.length, 'waiting for review')}${item('#/all?tab=stalled', stl.length, stl.length === 1 ? 'stalled claim' : 'stalled claims')}</div>`;
+    const LIMIT = 4;
+    const callsBody = groups.length ? groups.map(([k, label, rows, right]) => `<div class="qgroup" id="q-${k}"><div class="qhead"><span class="small strong">${esc(label)}</span><span class="n">${rows.length}</span></div>
+        ${rows.slice(0, LIMIT).map(r => mini(r, `${right(r)} ${callBtn(r)}`, r.next_action ? `<span class="muted">Next:</span> ${esc(r.next_action)}` : '')).join('')}
+        ${rows.length > LIMIT ? `<a class="small more-link" href="#/mine?sort=urgency">${rows.length - LIMIT} more</a>` : ''}</div>`).join('')
+      : P.empty(my.length ? 'You are caught up' : 'No leads yet', my.length ? 'Nothing overdue, due today, or waiting on you.' : 'Claim a lead from Available to start your call list.', my.length ? '' : '<a class="btn primary" href="#/pool">Browse available leads</a>', 'sm');
+    const dlBody = deadlines.length ? `<div>${deadlines.slice(0, 5).map(r => mini(r, `<span class="small ${P.dayDiff(r.deadline) <= 2 ? 'due-hot' : ''}">${esc(P.date(r.deadline))} · ${esc(P.rel(P.dayDiff(r.deadline)))}</span>`,
+        `${r.owner_id === uid ? 'Yours' : 'Unclaimed'} · ${esc((P.APPROACH[r.approach] || [''])[0])}`)).join('')}</div>` : '';
+    const hotBody = (hotMine.length ? hotMine : hotAll).slice(0, 4).map(r => mini(r, claimBtn(r), (r.services || []).length ? `<span class="muted">Likely work:</span> ${esc(r.services.slice(0, 3).join(', '))}` : '')).join('');
+    const teamBody = mgr ? (() => {
+      const people = {};
+      board.filter(r => r.owner_id && P.ACTIVE.includes(r.stage)).forEach(r => { const p = people[r.owner_id] ||= { name: r.owner_name, n: 0, od: 0, q: 0 }; p.n++; if (r.next_action_due && r.next_action_due < today) p.od++; if (['quote_needed', 'quote_sent'].includes(r.stage)) p.q++; });
+      const rows = Object.entries(people).sort((a, b) => b[1].od - a[1].od || b[1].n - a[1].n);
+      const quotes = board.filter(r => (r.quote_status === 'requested' && r.quote_requested_at <= P.addDays(-2)) || (['sent', 'no_response'].includes(r.quote_status) && P.ACTIVE.includes(r.stage) && (r.next_action_due || r.quote_sent_at || today) <= P.addDays(-7)));
+      return `${rows.length ? `<div class="tablewrap"><table class="tbl compact"><thead><tr><th scope="col">Person</th><th class="num" scope="col">Active</th><th class="num" scope="col">Overdue</th><th class="num" scope="col">Quotes</th></tr></thead><tbody>
+        ${rows.map(([id, p]) => `<tr data-person="${id}" class="clickable"><td><a href="#/team?person=${id}" data-person="${id}">${esc(p.name || 'Unknown')}</a></td><td class="num">${p.n}</td><td class="num ${p.od ? 'due-hot' : ''}">${p.od}</td><td class="num">${p.q}</td></tr>`).join('')}</tbody></table></div>` : P.empty('Nobody is working leads yet', '', '', 'sm')}
+        ${quotes.length ? `<p class="small" style="margin:10px 0 0"><a href="#/reports">${P.plural(quotes.length, 'quote')} need attention</a> (requested 2+ days ago without a price, or sent a week ago without an answer)</p>` : ''}`;
     })() : '';
+    const noteBody = notes.length ? `<div>${notes.slice(0, 5).map(n => `<div class="mini ${n.read ? '' : 'unread'}" ${n.opportunity_id ? `data-lead="${n.opportunity_id}"` : ''}>
+        <div class="t">${n.opportunity_id ? `<a class="ell" href="#/lead/${n.opportunity_id}" data-lead="${n.opportunity_id}">${esc(n.title)}</a>` : `<span class="ell">${esc(n.title)}</span>`}${n.read ? '' : '<span class="sr">, new</span>'}</div><div class="s">${esc(n.body || '')}</div><div class="r"><span class="small faint nowrap">${esc(P.ago(n.at))}</span></div></div>`).join('')}</div>` : '';
 
-    const priBody = priorities.length ? `<div>${priorities.slice(0, 7).map(r => mini(r, r.next_action_due ? ui.due(r.next_action_due) : r.stale ? '<span class="badge warm">No recent activity</span>' : r.needs_review ? '<span class="badge warm">Check source</span>' : '',
-        r.next_action ? `<span class="muted">Next:</span> ${esc(r.next_action)}` : '<span class="faint">No next action set</span>')).join('')}</div>`
-      : P.empty(my.length ? 'You are caught up' : 'No leads yet', my.length ? 'No follow-ups due this week.' : 'Claim a lead from Available to start your pipeline.', my.length ? '' : '<a class="btn primary" href="#/pool">Browse available leads</a>', 'sm');
-    const dlBody = deadlines.length ? `<div>${deadlines.slice(0, 6).map(r => mini(r, `<span class="small ${P.dayDiff(r.deadline) <= 2 ? 'due-hot' : ''}">${esc(P.date(r.deadline))} · ${esc(P.rel(P.dayDiff(r.deadline)))}</span>`,
-        `${r.owner_id === me().id ? 'Yours' : 'Unclaimed'} · ${esc((P.APPROACH[r.approach] || [''])[0])}`)).join('')}</div>`
-      : P.empty('No bid deadlines this week', '', '', 'sm');
-    const hotBody = hotAll.length ? `<div>${hotAll.slice(0, 5).map(r => mini(r, claimBtn(r), (r.services || []).length ? `<span class="muted">Likely work:</span> ${esc(r.services.slice(0, 3).join(', '))}` : r.next_action ? `<span class="muted">Next:</span> ${esc(r.next_action)}` : '')).join('')}</div>`
-      : P.empty('No Hot leads in the pool', 'New finds arrive with each refresh.', '', 'sm');
-    const noteBody = notes.length ? `<div>${notes.slice(0, 6).map(n => `<div class="mini ${n.read ? '' : 'unread'}" ${n.opportunity_id ? `data-lead="${n.opportunity_id}"` : ''}>
-        <div class="t">${n.opportunity_id ? `<a class="ell" href="#/lead/${n.opportunity_id}" data-lead="${n.opportunity_id}">${esc(n.title)}</a>` : `<span class="ell">${esc(n.title)}</span>`}${n.read ? '' : '<span class="sr">, new</span>'}</div><div class="s">${esc(n.body || '')}</div><div class="r"><span class="small faint nowrap">${esc(P.ago(n.at))}</span></div></div>`).join('')}</div>`
-      : P.empty('Nothing new', 'Assignments, source changes on your leads and due follow-ups show up here.', '', 'sm');
-
-    view.innerHTML = `${P.pageHead({ title: 'Today', sub: `${esc(dateLine)}. ${my.length ? `You have ${P.plural(my.length, 'active lead')}.` : 'You have no active leads yet.'}`, actions: P.syncHtml() })}
-      ${kpis}${mgrQueue}
+    view.innerHTML = `${P.pageHead({ title: 'Today', sub: esc(dateLine), actions: P.syncHtml() })}
+      ${briefingHtml(P.state.briefing)}
+      ${kpis}
       <div class="cols">
         <div class="stack">
-          ${card('sec-pri', 'My priorities', priorities.length, priBody, priorities.length > 7 ? viewAll('#/mine?sort=urgency') : my.length ? viewAll('#/mine', 'My pipeline') : '')}
-          ${card('sec-dl', 'Upcoming deadlines', deadlines.length, dlBody, viewAll('#/gov?tab=open', 'Gov contracts'))}
+          ${mgr && !my.length ? card('sec-team', 'Team workload', null, teamBody, viewAll('#/team?tab=people', 'Team')) : card('sec-calls', "Today's call list", queueCount, callsBody, my.length ? viewAll('#/mine?sort=urgency', 'My pipeline') : '')}
+          ${deadlines.length ? card('sec-dl', 'Upcoming deadlines', deadlines.length, dlBody, viewAll('#/gov?tab=open', 'Gov contracts')) : ''}
         </div>
         <div class="stack">
-          ${card('sec-hot', 'Hot leads worth claiming', hotAll.length, hotBody, hotAll.length > 5 ? viewAll('#/pool?priority=Hot') : '')}
-          ${card('sec-new', 'Recent activity and changes', null, noteBody, notes.length ? '<button class="btn ghost sm" data-act="notifications">View all</button>' : '')}
+          ${mgr && my.length ? card('sec-team', 'Team workload', null, teamBody, viewAll('#/team?tab=people', 'Team')) : ''}
+          ${hotBody ? card('sec-hot', hotMine.length ? `Hot leads in ${terr.join(', ')}` : 'Hot leads worth claiming', (hotMine.length ? hotMine : hotAll).length, `<div>${hotBody}</div>`, viewAll('#/pool?priority=Hot')) : ''}
+          ${noteBody ? card('sec-new', 'Recent updates', null, noteBody, '<button class="btn ghost sm" data-act="notifications">View all</button>') : ''}
         </div>
       </div>`;
   }
@@ -478,8 +560,9 @@
   P.views.today = async (view) => {
     P.setPage('Today');
     if (!P.state.board) view.innerHTML = P.loadingPage('Today');
-    const [, notes] = await Promise.all([P.loadBoard(), P.rpc('get_notifications').catch(() => null)]);
+    const [, notes, brief] = await Promise.all([P.loadBoard(), P.rpc('get_notifications').catch(() => null), P.rpc('my_briefing').catch(() => null)]);
     if (notes) P.state.notes = notes;
+    if (brief) P.state.briefing = brief;
     if (P.state.page !== 'today') return;
     renderToday(view);
     P.state.rerender = () => P.state.page === 'today' && renderToday(view);

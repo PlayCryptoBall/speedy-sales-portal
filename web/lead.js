@@ -71,7 +71,7 @@
     const head = P.dwHead({
       ref: `${esc(o.ref)} · ${esc(P.KIND[o.kind] || o.kind)}`,
       tools: o.project?.source_url ? `<a class="btn ghost sm desk-only" href="${P.url(p.source_url)}" target="_blank" rel="noopener">${P.icon('ext', 'sm')}Source</a>` : '',
-      title: esc(company), sub: esc(p.title || o.title),
+      title: o.company?.id ? `<a href="#/today?company=${o.company.id}" data-company="${o.company.id}" class="co-link">${esc(company)}</a>` : esc(company), sub: esc(p.title || o.title),
       meta: `${ui.prio(o.priority, true)}<span>${P.icon('pin')}${esc(P.place(p))}</span>${p.stage ? `<span>${esc(P.PSTAGE[p.stage] || p.stage)}</span>` : ''}${dl}`,
     });
     const tabs = `<div class="tabs" role="tablist" aria-label="Lead sections">${TABS.map(([k, t]) => `<button class="tab" role="tab" id="lt_${k}" aria-controls="lp_body" aria-selected="${tab === k}" data-act="leadTab" data-tab="${k}">${esc(t)}${counts[k] ? ` <span class="n">${counts[k]}</span>` : ''}</button>`).join('')}</div>`;
@@ -83,6 +83,31 @@
   P.act.logTab = () => { P.state.leadTab = 'activity'; render(); setTimeout(() => document.getElementById('lg_body')?.focus(), 30); };
 
   // ---------------------------------------------------------------- tabs
+  function quoteCard(o) {
+    if (!o.full_access || !o.quote_status) return '';
+    const bits = [o.quote_requested_at && `Requested ${P.date(o.quote_requested_at)}`, o.quote_sent_at && `Sent ${P.date(o.quote_sent_at)}`,
+      o.quote_amount != null && P.money(o.quote_amount), o.quote_service, o.quote_decision_date && `Decision expected ${P.date(o.quote_decision_date)}`].filter(Boolean);
+    return `<div class="nextcard">${P.icon('quote')}<div class="grow"><div class="small muted">Quote</div><b>${esc(P.QUOTE_STATUS[o.quote_status] || o.quote_status)}</b>
+      ${bits.length ? `<div class="small" style="margin-top:4px">${esc(bits.join(' · '))}</div>` : ''}</div>${canWork(o) ? '<button class="btn sm" data-act="editQuote">Update</button>' : ''}</div>`;
+  }
+  P.act.editQuote = () => {
+    const o = cur;
+    P.dialog({ title: 'Quote', ok: 'Save',
+      fields: [
+        { name: 'quote_status', label: 'Status', type: 'select', value: o.quote_status || 'requested', options: Object.entries(P.QUOTE_STATUS) },
+        { name: 'quote_service', label: 'Service quoted', value: o.quote_service || '', placeholder: 'Core drilling, wall sawing' },
+        { name: 'quote_requested_at', label: 'Requested on', type: 'date', value: o.quote_requested_at || '' },
+        { name: 'quote_sent_at', label: 'Sent on', type: 'date', value: o.quote_sent_at || '' },
+        { name: 'quote_amount', label: 'Amount ($, optional)', type: 'number', value: o.quote_amount ?? '' },
+        { name: 'quote_decision_date', label: 'Decision expected (optional)', type: 'date', value: o.quote_decision_date || '' },
+        { name: 'next_action_due', label: 'Follow up on', type: 'date', value: o.next_action_due || '', quick: true },
+      ],
+      onOk: async (v) => {
+        const stage = v.quote_status === 'sent' && ['claimed', 'contacted', 'qualified', 'quote_needed'].includes(o.stage) ? 'quote_sent' : null;
+        const r = await P.rpc('log_activity', { p_id: o.id, p: { kind: 'quote', ...v, quote_amount: v.quote_amount === '' ? null : v.quote_amount, stage, body: `Quote ${P.QUOTE_STATUS[v.quote_status].toLowerCase()}` } });
+        if (r.ok === false) throw new Error(r.message);
+      } }).then(v => { if (v) reload('Quote updated.'); });
+  };
   function nextCard(o) {
     const edit = canWork(o);
     if (o.stage === 'available') return o.next_action ? `<div class="nextcard">${P.icon('flag')}<div class="grow"><div class="small muted">Suggested first step</div><b>${esc(o.next_action)}</b></div></div>` : '';
@@ -90,7 +115,7 @@
     if (!o.next_action && !o.next_action_due) return edit && P.ACTIVE.concat(['nurture']).includes(o.stage) ? `<div class="nextcard">${P.icon('flag')}<div class="grow"><div class="small muted">Next action</div><span class="muted">None set. Leads without a follow-up date do not show up on Today.</span></div><button class="btn sm" data-act="setFollowUp">Set follow-up</button></div>` : '';
     const n = o.next_action_due ? P.dayDiff(o.next_action_due) : null;
     return `<div class="nextcard ${n !== null && n <= 0 && P.ACTIVE.includes(o.stage) ? 'hot' : ''}">${P.icon('flag')}<div class="grow"><div class="small muted">Next action</div><b>${esc(o.next_action || 'Follow up')}</b>${o.next_action_due ? `<div style="margin-top:4px">${ui.due(o.next_action_due)} <span class="small muted">${esc(P.date(o.next_action_due, { weekday: true }))}</span></div>` : ''}</div>
-      ${edit ? '<button class="btn sm" data-act="setFollowUp">Change</button>' : ''}</div>`;
+      ${edit ? '<button class="btn sm" data-act="setFollowUp">Change</button>' : ''}</div>${quoteCard(o)}`;
   }
   function overview(o) {
     const p = o.project || {}, r = o.priority_reasons || {};
@@ -176,11 +201,13 @@
         <div class="grid2">
           <label class="field"><span>Speedy quote amount ($)</span><input type="number" id="lg_quote" min="0" step="any" value="${o.quote_amount ?? ''}"><span class="help">Speedy's price, not the project value.</span></label>
           <label class="field"><span>Quote sent on</span><input type="date" id="lg_qdate" value="${esc(o.quote_sent_at || '')}"></label>
+          <label class="field"><span>Quote status</span><select id="lg_qstatus"><option value="">Not quoted</option>${Object.entries(P.QUOTE_STATUS).map(([k, t]) => `<option value="${k}" ${o.quote_status === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+          <label class="field"><span>Decision expected</span><input type="date" id="lg_qdecide" value="${esc(o.quote_decision_date || '')}"></label>
           <label class="field"><span>Expected work date</span><input type="date" id="lg_work" value="${esc(o.expected_work_date || '')}"></label>
           <label class="field"><span>Outcome reason</span><input type="text" id="lg_reason" value="${esc(o.outcome_reason || '')}" placeholder="Needed for Won, Lost or Disqualified"></label>
         </div>
       </details>
-      <div class="savebar"><button class="btn primary" data-act="saveLog" id="lg_save">Save call</button><span class="hint" id="lg_hint">${o.stage === 'claimed' ? 'Saving a call, email, text or visit moves this to Contacted.' : ''}</span></div>
+      <div class="savebar"><button class="btn primary" data-act="saveLog" id="lg_save">Save call</button><span class="hint" id="lg_hint">${o.stage === 'claimed' ? 'Reaching someone moves this to Contacted. No answer or a voicemail does not.' : ''}</span></div>
     </div>`;
   }
   const KIND_LABEL = { call: 'Call', email: 'Email', text: 'Text', visit: 'Visit', meeting: 'Meeting', note: 'Note', claim: 'Claimed', release: 'Released', assign: 'Assigned', quote: 'Quote',
@@ -194,7 +221,7 @@
       const ch = t.data?.changes ? Object.entries(t.data.changes).filter(([k]) => k !== 'stage').map(([k, [a, b]]) => `${k.replace(/_/g, ' ')}: ${fmt(a)} → ${fmt(b)}`).join('; ') : '';
       const label = t.kind === 'note' && !t.body && t.to_stage ? 'Stage changed' : KIND_LABEL[t.kind] || t.kind;
       return `<li class="${cls}"><span class="pt"></span>${when}
-        <div class="what">${esc(label)}${t.outcome ? ': ' + esc((P.OUTCOMES.find(x => x[0] === t.outcome) || [0, t.outcome.replace(/_/g, ' ')])[1]) : ''}${t.to_stage ? ` <span class="badge outline">${esc(P.stageLabel(t.from_stage || ''))} → ${esc(P.stageLabel(t.to_stage))}</span>` : ''}${t.contact_name ? ` <span class="small muted">with ${esc(t.contact_name)}</span>` : ''}</div>
+        <div class="what">${esc(label)}${t.outcome ? ': ' + esc(P.OUTCOME_LABEL[t.outcome] || t.outcome.replace(/_/g, ' ')) : ''}${t.to_stage ? ` <span class="badge outline">${esc(P.stageLabel(t.from_stage || ''))} → ${esc(P.stageLabel(t.to_stage))}</span>` : ''}${t.contact_name ? ` <span class="small muted">with ${esc(t.contact_name)}</span>` : ''}</div>
         ${t.body ? `<div class="body">${esc(t.body)}</div>` : ''}${ch ? `<div class="chg">${esc(ch)}</div>` : ''}</li>`;
     }).join('');
     return items ? `<ul class="timeline">${items}</ul>` : '<p class="muted">Nothing logged yet.</p>';
@@ -325,6 +352,9 @@
       canWork(o) && active && !['quote_needed', 'quote_sent'].includes(o.stage) && { label: 'Request a quote', icon: 'quote', run: () => P.moveStage(o, 'quote_needed') },
       o.full_access && o.company && canWork(o) && { label: 'Add contact', icon: 'plus', run: () => P.act.addContact() },
       o.project?.source_url && { label: 'Open the source', icon: 'ext', run: () => window.open(o.project.source_url, '_blank', 'noopener') },
+      o.project?.id && { label: o.project.watching ? 'Stop watching this project' : 'Watch this project', icon: 'bell', run: async () => {
+        const r = await P.rpc('toggle_watch', { p_project: o.project.id }); reload(r.watching ? 'Watching. You will be told about deadline, award and status changes.' : 'No longer watching.'); } },
+      o.company?.id && { label: 'Company profile', icon: 'building', run: () => P.openCompany(o.company.id) },
       '-',
       mgr && { label: o.owner_id ? 'Reassign' : 'Assign', icon: 'swap', run: () => P.act.assign() },
       (o.is_mine && (active || o.stage === 'nurture')) || (mgr && o.owner_id) ? { label: mgr && !o.is_mine ? 'Release to the pool' : 'Release', icon: 'release', danger: true, run: () => P.act.release() } : null,
@@ -365,9 +395,17 @@
     P.state.log.outcome = on ? el.dataset.outcome : null;
     const st = document.getElementById('lg_stage');
     if (on && st) {
-      const map = { quote_requested: 'quote_needed', meeting_set: 'qualified' };
-      if (map[el.dataset.outcome]) { st.value = map[el.dataset.outcome]; document.getElementById('lg_more').open = true; }
-      if (el.dataset.outcome === 'wrong_number') document.getElementById('lg_hint').textContent = 'Tip: fix or remove the wrong number on the Contacts tab.';
+      const map = { quote_requested: 'quote_needed' };
+      if (map[el.dataset.outcome] && st.value !== map[el.dataset.outcome]) { st.value = map[el.dataset.outcome]; }
+      // suggest the next step; anything already typed is kept
+      const next = { no_answer: ['Call again', 1], voicemail: ['Call back if they do not reply', 2], call_back: ['Call back', 1], requested_info: ['Send the information they asked for', 1],
+        interested: ['Send pricing or set a site visit', 2], quote_requested: ['Get the quote out', 2] }[el.dataset.outcome];
+      const nx = document.getElementById('lg_next'), due = document.getElementById('lg_due');
+      if (next && nx && !nx.value.trim()) nx.value = next[0];
+      if (next && due && !due.value) due.value = P.addDays(next[1]);
+      document.getElementById('lg_hint').textContent = el.dataset.outcome === 'wrong_contact' ? 'Tip: fix or remove the wrong contact on the Contacts tab.'
+        : el.dataset.outcome === 'not_interested' ? 'Tip: move it to Nurture or Lost in "Stage, services, quote and outcome".'
+        : next ? `Follow-up suggested for ${P.date(due.value)}. Change it if needed.` : '';
     }
   };
   P.act.quickDue = (el) => { document.getElementById('lg_due').value = P.addDays(Number(el.dataset.days)); el.parentElement.querySelectorAll('.chip').forEach(b => b.setAttribute('aria-pressed', b === el)); };
@@ -384,6 +422,7 @@
           stage: g('lg_stage').value !== cur.stage ? g('lg_stage').value : null,
           services_confirmed: [...document.querySelectorAll('#lg_more [data-svc][aria-pressed="true"]')].map(b => b.dataset.svc),
           scope_confirmed_note: g('lg_scope').value, quote_amount: g('lg_quote').value || null, quote_sent_at: g('lg_qdate').value || null,
+          ...(g('lg_qstatus').value && g('lg_qstatus').value !== cur.quote_status ? { quote_status: g('lg_qstatus').value } : {}), quote_decision_date: g('lg_qdecide').value || null,
           expected_work_date: g('lg_work').value || null, outcome_reason: g('lg_reason').value,
         });
       }
@@ -436,5 +475,51 @@
     (P.state.notes || []).forEach(n => { n.read = true; });
     renderNotes(P.state.notes || []);
     P.state.rerender?.();
+  });
+
+  // ---------------------------------------------------------------- company profile (one contractor across projects)
+  P.showCompany = async (id, opts = {}) => {
+    const D = P.drawer;
+    const same = D.open && D.kind === 'company' && D.key === id;
+    if (same && !opts.force) return;
+    D.show('company', id);
+    if (!same) D.set(P.dwLoading());
+    try {
+      const c = await P.rpc('get_company', { p_id: id });
+      if (!(D.open && D.key === id)) return;
+      const k = c.company, sm = c.summary || {}, opps = c.opportunities || [];
+      const open = opps.filter(o => !P.CLOSED.includes(o.stage)), closed = opps.filter(o => P.CLOSED.includes(o.stage));
+      const oppRow = (o) => `<div class="mini" data-lead="${o.id}"><div class="t"><a class="ell" href="#/lead/${o.id}" data-lead="${o.id}">${esc(o.project?.title || o.title)}</a></div>
+        <div class="s">${esc(o.ref)} · ${esc(P.stageLabel(o.stage))}${o.owner_name ? ' · ' + esc(o.owner_name) : ' · Unclaimed'}${o.project?.city ? ' · ' + esc(o.project.city) : ''}</div>
+        <div class="r">${o.quote_status ? `<span class="badge outline">Quote ${esc((P.QUOTE_STATUS[o.quote_status] || '').toLowerCase())}${o.quote_amount ? ' ' + esc(P.money(o.quote_amount)) : ''}</span>` : ''}${o.next_action_due ? ui.due(o.next_action_due) : ''}</div></div>`;
+      const facts = [['Phone', k.phone], ['Website', k.website && `<a href="${P.url(/^https?:/i.test(k.website) ? k.website : 'https://' + k.website)}" target="_blank" rel="noopener">${esc(k.website)}</a>`], ['Office', k.hq && esc(k.hq)],
+        ['Works in', (c.locations || []).length && esc(c.locations.slice(0, 6).join('; '))], ['Last contact', sm.last_contact_at ? esc(P.dateTime(sm.last_contact_at)) : '<span class="faint">No calls logged yet</span>'],
+        ['Next follow-up', sm.next_follow_up ? ui.due(sm.next_follow_up) : '<span class="faint">None you can see</span>'], ['Being worked by', (sm.owners || []).length ? esc(sm.owners.join(', ')) : '<span class="faint">Nobody</span>']]
+        .filter(f => f[1]).map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('');
+      D.set(`<div class="dw-head">${P.dwHead({ ref: esc({ contractor: 'Contractor', owner: 'Owner', agency: 'Agency', developer: 'Developer' }[k.kind] || 'Company'), title: esc(k.name),
+          sub: `${P.plural(sm.open || 0, 'open lead')} · ${sm.won || 0} won · ${sm.lost || 0} lost · ${P.plural((c.awards || []).length, 'public award')}`,
+          tools: `<button class="btn sm ${c.watching ? '' : 'ghost'}" data-act="watchCompany" data-id="${k.id}" aria-pressed="${!!c.watching}">${P.icon('bell', 'sm')}${c.watching ? 'Watching' : 'Watch'}</button>` })}<div style="height:12px"></div></div>
+        <div class="dw-body">
+          ${(sm.owners || []).length && !(sm.owners || []).includes(P.state.me.full_name) ? `<div class="alert warn">${P.icon('team')}<div class="grow">${esc(sm.owners.join(', '))} ${sm.owners.length === 1 ? 'is' : 'are'} working this company. Coordinate before you call.</div></div>` : ''}
+          <div class="panel"><dl class="facts">${facts}</dl></div>
+          ${(c.contacts || []).length ? `<div class="panel"><h3>Contacts</h3>${c.contacts.map(x => `<div class="contact"><div><b class="strong">${esc(x.name || 'Main line')}</b>${x.title ? ` <span class="muted small">${esc(x.title)}</span>` : ''}${x.verified ? ' <span class="badge ok">Verified</span>' : ''}</div>
+              <div class="row" style="gap:8px;margin-top:4px">${x.phone ? `<a class="btn sm" href="tel:${esc(x.phone.replace(/[^\d+]/g, ''))}">${P.icon('phone', 'sm')}${esc(x.phone)}</a>` : ''}${x.email ? `<a class="btn sm ghost" href="mailto:${esc(x.email)}">${P.icon('mail', 'sm')}${esc(x.email)}</a>` : ''}</div></div>`).join('')}</div>` : ''}
+          <div class="panel"><h3>Open leads <span class="n faint">${open.length}</span></h3>${open.length ? `<div class="card">${open.map(oppRow).join('')}</div>` : '<p class="muted small">None open.</p>'}</div>
+          ${(c.awards || []).length ? `<div class="panel"><h3>Public awards and low bids</h3><ul class="plain-list">${c.awards.map(a => `<li><b class="strong">${esc(a.title)}</b><div class="small muted">${esc({ awarded: 'Awarded', intended: 'Intended award', low_bidder: 'Apparent low bidder' }[a.status] || a.status || '')}${a.amount ? ' · ' + esc(P.money(a.amount)) : ''}${a.as_of ? ' · ' + esc(P.date(a.as_of)) : ''}${a.owner ? ' · ' + esc(a.owner) : ''}${a.source_url ? ` · <a href="${P.url(a.source_url)}" target="_blank" rel="noopener">record</a>` : ''}</div></li>`).join('')}</ul></div>` : ''}
+          ${(c.bids || []).length ? `<div class="panel"><h3>Other bids on record</h3><ul class="plain-list">${c.bids.map(b => `<li class="small">${esc(b.title)}${b.amount ? ' · ' + esc(P.money(Number(b.amount))) : ''}${b.rank ? ' · rank ' + esc(b.rank) : ''}</li>`).join('')}</ul></div>` : ''}
+          <div class="panel"><h3>Contact history</h3>${(c.history || []).length ? `<ul class="timeline">${c.history.map(h => `<li class="${['call', 'email', 'text', 'visit', 'meeting'].includes(h.kind) ? 'call-kind' : 'sys-kind'}"><span class="pt"></span>
+              <div class="when">${esc(P.dateTime(h.at))} · ${esc(h.user_name || 'Someone')}${h.ref ? ` · <a href="#/lead/${h.opportunity_id}" data-lead="${h.opportunity_id}">${esc(h.ref)}</a>` : ''}</div>
+              <div>${esc(h.kind[0].toUpperCase() + h.kind.slice(1).replace('_', ' '))}${h.outcome ? ': ' + esc(P.OUTCOME_LABEL[h.outcome] || h.outcome.replace(/_/g, ' ')) : ''}</div>${h.body ? `<div class="chg">${esc(h.body)}</div>` : ''}</li>`).join('')}</ul>` : '<p class="muted small">Nobody has logged contact with this company yet.</p>'}</div>
+          ${closed.length ? `<details class="panel plain"><summary><h3 style="display:inline">Closed leads <span class="n faint">${closed.length}</span></h3></summary><div class="card">${closed.map(oppRow).join('')}</div></details>` : ''}
+        </div>`);
+      D.focus();
+    } catch (e) {
+      if (D.open && D.key === id) D.set(`<div class="dw-head">${P.dwHead({ title: 'Could not open this company' })}<div style="height:14px"></div></div><div class="dw-body">${P.errorState(e.message)}</div>`);
+    }
+  };
+  P.act.watchCompany = (el) => P.busy(el, async () => {
+    const r = await P.rpc('toggle_watch', { p_company: el.dataset.id });
+    P.toast(r.watching ? 'Watching. You will hear about new awards and changes for this company.' : 'No longer watching.');
+    P.showCompany(el.dataset.id, { force: true });
   });
 })();

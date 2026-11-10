@@ -126,7 +126,7 @@
         if (document.visibilityState !== 'visible' || !P.state.me) return;
         const n = await P.rpc('me').catch(() => null);
         if (n) { P.state.me = { ...P.state.me, ...n }; P.setUnread(n.unread); }
-        await P.loadBoard(true).catch(() => {});
+        await Promise.all([P.loadBoard(true).catch(() => {}), P.loadFresh()]);
         if (idle() && ['today', 'pool', 'mine', 'gov', 'all'].includes(P.state.page)) P.state.rerender?.();
       };
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { P.invalidate(); refresh(); } });
@@ -134,6 +134,7 @@
       P.sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_OUT') { P.state.me = null; signInScreen({ text: 'You are signed out.' }); } });
     }
     if (['welcome', 'setup', ''].includes(P.parseHash().name) || !location.hash) location.hash = '#/today';
+    P.loadFresh();
     P.route();
   }
 

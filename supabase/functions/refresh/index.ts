@@ -344,6 +344,67 @@ async function authorize(req: Request): Promise<{ ok: boolean; user: string | nu
   return { ok: true, user: user.id };
 }
 
+// ---------------------------------------------------------------- missed-opportunity check: read one record and classify it
+// Managers paste a SAM.gov notice, a USAspending award or an Orlando permit. Nothing is saved unless they choose Import.
+async function probe(input: string, doImport: boolean, user: string) {
+  const run = new Run(0, 300, 12, 60000);
+  await loadTerms(run);
+  const skip: string[] = [];
+  let source = '', p: Record<string, unknown> | null = null;
+  const sam = input.match(/sam\.gov\/.*?([0-9a-f]{32})/i) || (/^[0-9a-f]{32}$/i.test(input.trim()) ? [input, input.trim()] : null);
+  const usa = input.match(/usaspending\.gov\/award\/([^/?#\s]+)/i);
+  const permit = input.match(/\b([A-Z]{3}\d{4}-\d{3,6})\b/i);
+  if (sam) {
+    source = 'sam_gov';
+    const det = await run.get(`https://sam.gov/api/prod/opps/v2/opportunities/${sam[1].toLowerCase()}`, 'application/hal+json');
+    const n = normalizeDetails(det);
+    if (!n) throw new Error('SAM.gov did not return that notice');
+    const facts = samFacts([n], det);
+    p = samPayload(n.sol || sam[1], [n], facts, false, run.terms);
+    const st = det?.data2?.placeOfPerformance?.state?.code;
+    if (st && st !== 'FL') skip.push(`Place of performance is ${st}, not Florida; the search only asks for Florida work`);
+    if (!n.active) skip.push('The notice is archived; the search only asks for active notices');
+  } else if (usa) {
+    source = 'usaspending_awards';
+    const d = await run.get(`https://api.usaspending.gov/api/v2/awards/${encodeURIComponent(decodeURIComponent(usa[1]))}/`, 'application/json');
+    const a = { id: d.generated_unique_award_id || usa[1], piid: d.piid || '', recipient: d.recipient?.recipient_name || '', amount: d.total_obligation ?? null,
+      description: d.description || '', start: d.date_signed || null, agency: d.awarding_agency?.toptier_agency?.name || '', subAgency: d.awarding_agency?.subtier_agency?.name || '',
+      zip: d.place_of_performance?.zip5 || null, naics: d.latest_transaction_contract_data?.naics || null };
+    const cls = classify([{ field: 'award description', text: a.description, doc: `USAspending award ${a.piid}`, url: input }], run.terms, { value: a.amount });
+    p = usaPayload(a, d, cls);
+    if (d.place_of_performance?.state_code && d.place_of_performance.state_code !== 'FL') skip.push(`Performed in ${d.place_of_performance.state_code}, not Florida`);
+    if (a.naics && !USA_NAICS.includes(String(a.naics))) skip.push(`NAICS ${a.naics} is not one of the construction codes searched`);
+    if ((a.amount ?? 0) < 250000) skip.push('Below the $250,000 minimum');
+    if (a.start && Date.parse(a.start) < Date.now() - 60 * 86400000) skip.push('Signed more than 60 days before the search window');
+  } else if (permit) {
+    source = 'orlando_permits';
+    const rows = await run.get(`https://data.cityoforlando.net/resource/ryhf-m453.json?permit_number=${encodeURIComponent(permit[1].toUpperCase())}`, 'application/json');
+    if (!rows?.length) throw new Error('The City of Orlando dataset has no permit with that number');
+    const x = normalizeOrlandoPermit(rows[0]);
+    const cls = classify(permitSections(x, ''), run.terms, { value: x.value });
+    p = permitPayload(x, cls, { city: 'Orlando', county: 'Orange', source_id: source, key_prefix: 'orlando', dataset_url: 'https://data.cityoforlando.net/resource/ryhf-m453.json' });
+    if (!/^Commercial/i.test(String(rows[0].plan_review_type || ''))) skip.push('Not a commercial permit');
+    if ((x.value ?? 0) < 500000) skip.push('Valuation under the $500,000 minimum');
+    if (!/^(Alteration|Addition|Repair|Demo|Demolition|New)/i.test(x.worktype)) skip.push(`Work type "${x.worktype}" is not searched`);
+  } else {
+    throw new Error('Paste a SAM.gov notice link, a USAspending award link, or an Orlando permit number (like BLD2026-12345)');
+  }
+  if (p.relevance === 'low') skip.push('Classified as not relevant: ' + p.review_reason);
+  const out: Record<string, unknown> = { ok: true, source, title: p.title || p.status_text, relevance: p.relevance, reason: p.review_reason,
+    evidence: p.evidence, services: p.services_likely, region: p.region, county: p.county, would_skip: skip };
+  if (doImport) {
+    if (p.relevance === 'low' || skip.length) { p.relevance = 'review'; }
+    p.review_reason = 'Added from a missed-opportunity check' + (skip.length ? ` (the collector skipped it: ${skip.join('; ')})` : '');
+    const { data: runId, error } = await db.rpc('refresh_start_run', { p_source: source, p_trigger: 'manual', p_user: user, p_attempt: 1 });
+    if (error) throw new Error(error.message);
+    const r = new Run(runId as number, 300, 5);
+    await r.upsert(p);
+    await db.rpc('refresh_finish_run', { p_run: runId, p_status: 'success', p_counts: r.counts, p_log: ['imported from a missed-opportunity check: ' + input] });
+    out.imported = true; out.project_key = p.external_key;
+  }
+  return out;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
@@ -353,6 +414,11 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { /* empty body */ }
   const source = String(body.source || 'all');
   const trigger = auth.user ? 'manual' : (body.trigger === 'retry' ? 'retry' : 'schedule');
+  if (source === 'probe') {
+    if (!auth.user) return json({ error: 'manager_only' }, 403);
+    try { return json(await probe(String(body.url || ''), !!body.import, auth.user)); }
+    catch (e) { return json({ ok: false, error: (e as Error).message }); }
+  }
   const work = (async () => {
     if (source === 'retry_failed') return retryFailed();
     if (source === 'maintenance') return db.rpc('daily_maintenance');

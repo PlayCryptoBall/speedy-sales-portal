@@ -266,5 +266,17 @@ await t('Real SAM.gov records that were missed before are now caught (from the N
   assert.equal(r('Hoist and Cranes Maintenance Services FY27'), 'low');
 });
 
+
+await t('Every one of Speedy\'s eleven published services is recognized as documented scope', () => {
+  const cases = { 'Road & bridge deconstruction': 'Removal of the existing bridge and barrier wall removal', 'Core drilling': 'Core drill 12 holes through the slab',
+    'Wire sawing': 'Wire saw the pier cap', 'Slab sawing': 'Slab sawing for trench', 'Chain sawing': 'Concrete chain saw openings',
+    'Hand sawing': 'Hand saw concrete at the stair', 'Curb sawing': 'Curb and gutter removal', 'Wall sawing': 'Wall sawing for new door openings',
+    'Robotic demolition': 'Robotic demolition of the mezzanine', 'Breaking & removal': 'Concrete removal and haul-off', 'GPR scanning': 'GPR scan before coring' };
+  for (const [svc, text] of Object.entries(cases)) {
+    const c = C('Project', text);
+    assert.equal(c.relevance, 'high', svc); assert.ok(c.services.includes(svc), `${svc}: ${c.services}`);
+  }
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

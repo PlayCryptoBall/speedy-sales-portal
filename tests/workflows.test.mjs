@@ -538,6 +538,182 @@ await test('Run counts include what each refresh examined and how much of it was
   assert.equal(ov.sources.find(s => s.id === 'orlando_permits').last_run.examined, 120);
 });
 
+
+// ---------------------------------------------------------------- daily operations
+const freshClaim = async (sess, who) => {
+  const o = await opp(`stage = 'available' and not needs_review and company_id is not null and project_id is not null`);
+  await sess.rpc('claim_opportunity', { p_id: o.id, p_ack_company: true });
+  return o.id;
+};
+
+await test('Call outcomes: no answer and voicemail do not mark a lead Contacted; reaching someone does; a quote request starts quote tracking', async () => {
+  const id = await freshClaim(b);
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'call', outcome: 'no_answer' } });
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'call', outcome: 'voicemail', body: 'Left a message for the estimator' } });
+  assert.equal((await opp(`id = '${id}'`)).stage, 'claimed');
+  await b.fails('log_activity', { p_id: id, p: { kind: 'call', outcome: 'made_up' } }, /bad_outcome/);
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'call', outcome: 'spoke', body: 'Talked to Maria, PM' } });
+  assert.equal((await opp(`id = '${id}'`)).stage, 'contacted');
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'call', outcome: 'quote_requested', quote_service: 'Wall sawing', quote_decision_date: '2099-01-15' } });
+  let o = await opp(`id = '${id}'`);
+  assert.equal(o.stage, 'quote_needed'); assert.equal(o.quote_status, 'requested'); assert.ok(o.quote_requested_at); assert.equal(o.quote_service, 'Wall sawing');
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'quote', stage: 'quote_sent', quote_amount: 18500, next_action_due: '2099-01-10' } });
+  o = await opp(`id = '${id}'`);
+  assert.equal(o.quote_status, 'sent'); assert.ok(o.quote_sent_at); assert.equal(Number(o.quote_amount), 18500);
+  await b.rpc('log_activity', { p_id: id, p: { kind: 'note', stage: 'won', outcome_reason: 'Best price and schedule' } });
+  assert.equal((await opp(`id = '${id}'`)).quote_status, 'accepted');
+  const acts = (await admin.query(`select user_id, outcome, created_at from activities where opportunity_id = $1 and kind = 'call' order by created_at`, [id])).rows;
+  assert.equal(acts.length, 4); assert.ok(acts.every(x => x.user_id === B && x.created_at));
+});
+
+await test('Company profile: one contractor across several projects, contact history shared without exposing other people\'s notes', async () => {
+  const comp = (await admin.query(`select company_id from opportunities where company_id is not null group by 1 order by count(*) desc limit 1`)).rows[0].company_id;
+  const o1 = (await admin.query(`select id from opportunities where company_id = $1 and stage = 'available' and not needs_review limit 1`, [comp])).rows[0];
+  if (o1) { await a.rpc('claim_opportunity', { p_id: o1.id, p_ack_company: true }); await a.rpc('log_activity', { p_id: o1.id, p: { kind: 'call', outcome: 'spoke', body: 'PRIVATE NOTE from Flip' } }); }
+  const forB = await b.rpc('get_company', { p_id: comp });
+  const forM = await m.rpc('get_company', { p_id: comp });
+  assert.ok(forB.opportunities.length >= 1 && forB.company.id === comp);
+  if (o1) {
+    const hb = forB.history.find(h => h.opportunity_id === o1.id), hm = forM.history.find(h => h.opportunity_id === o1.id);
+    assert.equal(hb.user_name, 'Test Flip'); assert.equal(hb.body, null, 'another salesperson sees who called and when, not the note');
+    assert.equal(hm.body, 'PRIVATE NOTE from Flip');
+    assert.ok(forB.summary.owners.includes('Test Flip')); assert.ok(forB.summary.last_contact_at);
+  }
+  await anon.fails('get_company', { p_id: comp }, /permission denied/);
+  await x.fails('get_company', { p_id: comp }, /not_authorized/);
+});
+
+await test('Watchlists: a watched project change and a contractor\'s new award notify the right people once', async () => {
+  const id = await run('sam_gov');
+  const p0 = await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:watch-1', source_id: 'sam_gov', solicitation_no: 'W9-WATCH-1', title: 'Pier 3 repair, Mayport',
+    county: 'Duval', region: 'Northeast FL', stage: 'bidding', relevance: 'potential', deadline: '2099-02-01T14:00:00-05:00', opportunity: { kind: 'gov_bid', approach: 'quote_bidders', title: 'Pier 3 repair' } } });
+  assert.equal((await b.rpc('toggle_watch', { p_project: p0.project_id })).watching, true);
+  // Rep Two also works another lead with the contractor that will win
+  const comp = (await admin.query(`select private.upsert_company('Watchco Marine Builders', 'contractor') c`)).rows[0].c;
+  const other = await freshClaim(b);
+  await admin.query(`update opportunities set company_id = $1 where id = $2`, [comp, other]);
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:watch-1', source_id: 'sam_gov', stage: 'awarded',
+    winner: { name: 'Watchco Marine Builders', amount: 3100000, status: 'awarded', as_of: '2026-11-01' } } });
+  const n = (await admin.query(`select title from notifications where user_id = $1 and kind = 'watch' order by id`, [B])).rows.map(r => r.title);
+  assert.ok(n.some(t => /Watched project: Pier 3 repair/.test(t)), 'watcher told about the award');
+  assert.ok(n.some(t => /contractor you work with has a new award/.test(t)), 'owner of another lead with that contractor told');
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'sam:watch-1', source_id: 'sam_gov', stage: 'awarded',
+    winner: { name: 'Watchco Marine Builders', amount: 3100000, status: 'awarded', as_of: '2026-11-01' } } });
+  assert.equal((await admin.query(`select count(*)::int n from notifications where user_id = $1 and kind = 'watch'`, [B])).rows[0].n, n.length, 'unchanged data, no repeat');
+  assert.equal((await b.rpc('toggle_watch', { p_project: p0.project_id })).watching, false);
+});
+
+await test('Saved searches and preferences are personal; notification preferences are respected', async () => {
+  await b.rpc('save_search', { p_list: 'pool', p_name: 'Central bridges', p_params: { region: 'Central FL', q: 'bridge' } });
+  assert.equal((await b.rpc('my_saved_searches', {})).length, 1); assert.equal((await a.rpc('my_saved_searches', {})).length, 0);
+  await b.fails('save_search', { p_list: 'all', p_name: 'x', p_params: {} }, /manager_only/);
+  const sid = (await b.rpc('my_saved_searches', {}))[0].id;
+  assert.equal((await a.rpc('delete_search', { p_id: sid })).ok, false, 'cannot delete someone else\'s');
+  await b.fails('update_my_prefs', { p: { territory: ['Narnia'] } }, /bad_region/);
+  await b.rpc('update_my_prefs', { p: { territory: ['Central FL', 'Tampa Bay'], services: ['Wall sawing'], notify: { deadlines: false, hack: true } } });
+  const me = await b.rpc('me', {});
+  assert.deepEqual(me.prefs.territory, ['Central FL', 'Tampa Bay']); assert.equal(me.prefs.notify.hack, undefined);
+  await admin.query(`select private.notify($1, null, 'deadline_soon', 'Test deadline', 'x', 'pref-test-1')`, [B]);
+  await admin.query(`select private.notify($1, null, 'manager_update', 'Test update', 'x', 'pref-test-2')`, [B]);
+  const got = (await admin.query(`select dedupe_key from notifications where dedupe_key like 'pref-test-%'`)).rows.map(r => r.dedupe_key);
+  assert.deepEqual(got, ['pref-test-2']);
+});
+
+await test('Morning schedule (Eastern time): collect once, retry failures, snapshot, alert only when incomplete, midday check', async () => {
+  await admin.query(`delete from private.test_refresh_calls; delete from private.scheduler_steps; delete from morning_snapshots`);
+  const auto = (await admin.query(`select id from sources where kind = 'automated' and enabled order by id`)).rows.map(r => r.id);
+  const tick = async (iso) => (await admin.query(`select private.scheduler_tick($1::timestamptz) r`, [iso])).rows[0].r;
+  const calls = async () => (await admin.query(`select source from private.test_refresh_calls order by id`)).rows.map(r => r.source);
+  assert.deepEqual((await tick('2026-11-12 04:05-05')).ran, [], 'nothing before 4:15');
+  assert.deepEqual((await tick('2026-11-12 04:17-05')).ran, ['morning']);
+  assert.deepEqual((await tick('2026-11-12 04:22-05')).ran, [], 'a second tick does not start the cycle again');
+  assert.deepEqual((await calls()).sort(), auto);
+  // the runs finish: all succeed except permits
+  const snap = (await admin.query(`select started_at from morning_snapshots where day = '2026-11-12'`)).rows[0];
+  for (const src of auto) {
+    const r = (await admin.query(`insert into refresh_runs (source_id, trigger, started_at, status, finished_at, error) values ($1, 'schedule', $2::timestamptz + interval '1 minute', $3, $2::timestamptz + interval '3 minutes', $4) returning id`,
+      [src, snap.started_at, src === 'orlando_permits' ? 'failed' : 'success', src === 'orlando_permits' ? 'HTTP 503' : null])).rows[0];
+  }
+  assert.deepEqual((await tick('2026-11-12 05:16-05')).ran, ['verify']);
+  assert.deepEqual((await calls()).filter(x => x === 'orlando_permits').length, 2, 'the failed source is retried once');
+  assert.deepEqual((await tick('2026-11-12 05:31-05')).ran, ['snapshot']);
+  let s = (await admin.query(`select * from morning_snapshots where day = '2026-11-12'`)).rows[0];
+  assert.equal(s.status, 'partial'); assert.equal(s.summary.sources_ok, auto.length - 1);
+  const fr = await b.rpc('data_freshness', {});
+  assert.equal(fr.status, 'partial'); assert.equal(fr.sources_total, auto.length); assert.equal(fr.sources[0].error, undefined, 'salespeople get no error text');
+  assert.deepEqual((await tick('2026-11-12 06:02-05')).ran, ['alert']);
+  const al = (await admin.query(`select title, body from notifications where user_id = $1 and kind = 'morning_refresh'`, [M])).rows;
+  assert.equal(al.length, 1); assert.match(al[0].title, /incomplete/); assert.match(al[0].body, /City of Orlando commercial building permits \(failed: HTTP 503\)/);
+  assert.deepEqual((await tick('2026-11-12 06:07-05')).ran, [], 'one alert per day');
+  assert.deepEqual((await tick('2026-11-12 12:20-05')).ran, ['midday']);
+  // next day everything succeeds by 6 AM: no alert
+  for (const src of auto) await admin.query(`insert into refresh_runs (source_id, trigger, started_at, status, finished_at) values ($1, 'schedule', '2026-11-13 04:20-05', 'success', '2026-11-13 04:25-05')`, [src]);
+  await tick('2026-11-13 04:16-05');
+  await admin.query(`update morning_snapshots set started_at = '2026-11-13 04:16-05' where day = '2026-11-13'`);
+  await tick('2026-11-13 05:20-05'); await tick('2026-11-13 05:35-05'); await tick('2026-11-13 06:05-05');
+  s = (await admin.query(`select * from morning_snapshots where day = '2026-11-13'`)).rows[0];
+  assert.equal(s.status, 'ready'); assert.equal(s.alerted_at, null);
+  // daylight saving time: 4:17 AM EDT in July is 08:17 UTC
+  await admin.query(`delete from private.test_refresh_calls`);
+  assert.deepEqual((await tick('2027-07-14 08:17+00')).ran, ['morning']);
+  assert.ok(!(await tick('2027-07-14 09:17+00')).ran.includes('morning'), '5:17 AM EDT is not the start time');
+});
+
+await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {
+  const cur = (await admin.query(`select value from settings where key = 'refresh_schedule'`)).rows[0].value;
+  await m.fails('update_setting', { p_key: 'refresh_schedule', p_value: { ...cur, morning: '4:15am' } }, /bad_value/);
+  await m.fails('update_setting', { p_key: 'refresh_schedule', p_value: { ...cur, verify: '04:00' } }, /bad_value/);
+  await b.fails('update_setting', { p_key: 'refresh_schedule', p_value: cur }, /manager_only/);
+  const { midday_sources, afternoon_sources, ...rest } = cur;
+  await m.rpc('update_setting', { p_key: 'refresh_schedule', p_value: { ...rest, morning: '04:10' } });
+  const now = (await admin.query(`select value from settings where key = 'refresh_schedule'`)).rows[0].value;
+  assert.equal(now.morning, '04:10'); assert.deepEqual(now.midday_sources, midday_sources);
+  await m.rpc('update_setting', { p_key: 'refresh_schedule', p_value: cur });
+});
+
+await test('Overlapping runs of the same source are refused; a stuck run is closed as failed', async () => {
+  await admin.query(`update refresh_runs set status = 'failed', finished_at = now() where status = 'running'`);
+  const r1 = await svc.rpc('refresh_start_run', { p_source: 'usaspending_awards', p_trigger: 'schedule' });
+  await svc.fails('refresh_start_run', { p_source: 'usaspending_awards', p_trigger: 'manual' }, /already_running/);
+  await admin.query(`update refresh_runs set started_at = now() - interval '20 minutes' where id = $1`, [r1]);
+  const r2 = await svc.rpc('refresh_start_run', { p_source: 'usaspending_awards', p_trigger: 'schedule' });
+  assert.ok(r2 > r1);
+  assert.equal((await admin.query(`select status from refresh_runs where id = $1`, [r1])).rows[0].status, 'failed');
+  await svc.rpc('refresh_finish_run', { p_run: r2, p_status: 'success', p_counts: {}, p_log: [] });
+});
+
+await test('Morning briefing and team report: personal for salespeople, team-wide for managers only', async () => {
+  const bb = await b.rpc('my_briefing', {});
+  assert.deepEqual(bb.territory, ['Central FL', 'Tampa Bay']); assert.equal(bb.team, undefined);
+  assert.ok(Array.isArray(bb.new_hot) && typeof bb.my_overdue === 'number');
+  const mb = await m.rpc('my_briefing', {});
+  assert.ok(mb.team && typeof mb.team.awaiting_review === 'number');
+  const rep = await m.rpc('team_report', { p: { from: '2026-01-01' } });
+  const rb = rep.people.find(x => x.id === B);
+  assert.ok(rb.attempts >= 4 && rb.conversations >= 2 && rb.quotes_requested >= 1 && rb.quotes_sent >= 1 && rb.won >= 1);
+  assert.ok(rb.attempts > rb.conversations, 'attempts and conversations are counted separately');
+  const only = await m.rpc('team_report', { p: { from: '2026-01-01', user_id: B } });
+  assert.equal(only.people.length, 1);
+  await b.fails('team_report', { p: {} }, /manager_only/);
+});
+
+await test('Missed-opportunity check explains whether a project is in the pipeline and, if not, why', async () => {
+  const known = (await admin.query(`select source_url, external_key from projects where external_key like 'sam:%' and source_url is not null limit 1`)).rows[0];
+  let r = await m.rpc('check_missed', { p_input: known.source_url });
+  assert.equal(r.cause, 'already_in_pipeline'); assert.ok(r.matches.length >= 1);
+  r = await m.rpc('check_missed', { p_input: 'https://www.examplecountybids.gov/bid/12345' });
+  assert.equal(r.cause, 'source_not_monitored');
+  r = await m.rpc('check_missed', { p_input: 'https://orangecountyfl.bonfirehub.com/opportunities/123456' });
+  assert.equal(r.cause, 'access_restricted', JSON.stringify(r.matches).slice(0, 300));
+  r = await m.rpc('check_missed', { p_input: 'https://app.buildingconnected.com/projects/zq77k1x' });
+  assert.equal(r.cause, 'access_restricted');
+  r = await m.rpc('check_missed', { p_input: 'https://sam.gov/opp/0123456789abcdef0123456789abcdef/view' });
+  assert.ok(['filtered_or_not_reached', 'source_not_refreshed', 'collector_failed'].includes(r.cause)); assert.equal(r.probe_supported, true);
+  await m.rpc('resolve_missed_check', { p_id: r.id, p: { resolution: 'not_relevant' } });
+  assert.ok((await m.rpc('missed_checks_list', {})).length >= 5);
+  await b.fails('check_missed', { p_input: 'https://sam.gov/opp/x' }, /manager_only/);
+});
+
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

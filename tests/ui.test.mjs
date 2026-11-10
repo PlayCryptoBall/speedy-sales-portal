@@ -112,7 +112,7 @@ await t('Phone: open a Hot lead, claim it, log a call with a follow-up', async (
   assert.match(await toast(flip, /Claimed/), /Claimed/);
   await drawer(flip).locator('.ownbar', { hasText: 'Yours' }).waitFor();
   await drawer(flip).getByRole('button', { name: 'Log activity' }).click();
-  await drawer(flip).getByRole('button', { name: 'Reached them', exact: true }).click();
+  await drawer(flip).getByRole('button', { name: 'Spoke with contractor', exact: true }).click();
   await flip.fill('#lg_body', 'Spoke with the estimator. They need 30 cores through a 10 in. deck and GPR first.');
   await drawer(flip).getByRole('button', { name: 'Next week', exact: true }).click();
   await flip.fill('#lg_next', 'Send core and GPR pricing');
@@ -239,11 +239,14 @@ await t('Saved work shows on another device; Today shows priorities, deadlines a
   await flipDesk.waitForFunction(() => !document.querySelector('#scrim.on'));
   await flipDesk.goto(BASE + '#/today');
   await flipDesk.waitForTimeout(300);
-  await flipDesk.getByRole('heading', { name: 'Hot leads worth claiming' }).waitFor();
+  await flipDesk.getByRole('heading', { name: /Hot leads/ }).first().waitFor();
   const kpi = Number(await flipDesk.locator('a.kpi[href="#/mine"] .val').textContent());
   const nav = Number(await flipDesk.locator('.sidebar [data-count="mine"]').textContent());
   assert.equal(kpi, nav, 'active-lead card matches the nav count');
-  assert.ok(await flipDesk.locator('#sec-pri .mini').count() >= 1, 'the follow-up shows under My priorities');
+  assert.equal(await flipDesk.locator(`#sec-calls [data-lead="${leadId}"]`).count(), 0, 'a follow-up due next week is not on today\'s call list');
+  await db.query(`update opportunities set next_action_due = (now() at time zone 'America/New_York')::date - 1 where id = $1`, [leadId]);
+  await flipDesk.reload(); await flipDesk.locator('#q-overdue').waitFor({ timeout: 15000 });
+  assert.ok(await flipDesk.locator(`#q-overdue [data-lead="${leadId}"]`).count() >= 1, 'once overdue it leads the call list');
   await shot(flipDesk, '07-desktop-today');
   await flipDesk.context().close();
 });
@@ -407,13 +410,34 @@ await t('Phone PDF view renders (team snapshot on a phone)', async () => {
   await p.context().close();
 });
 
+await t('Company profile, team report and missed-opportunity check', async () => {
+  await openLead(mgr, leadId);
+  await drawer(mgr).locator('a.co-link').click();
+  await drawer(mgr).getByRole('heading', { name: 'Contacts' }).waitFor({ timeout: 15000 });
+  await shot(mgr, '15-desktop-company');
+  await mgr.keyboard.press('Escape');
+  await mgr.goto(BASE + '#/reports');
+  await mgr.getByRole('heading', { name: 'By person' }).waitFor({ timeout: 15000 });
+  assert.ok(await mgr.locator('tr[data-person]').count() >= 1);
+  await shot(mgr, '16-desktop-report');
+  await mgr.goto(BASE + '#/sources');
+  await mgr.getByRole('tab', { name: 'Missed check' }).click();
+  await mgr.fill('[data-form=missed] input[name=q]', 'https://www.examplecountybids.gov/bid/12345');
+  await mgr.locator('[data-form=missed] button[type=submit]').click();
+  await mgr.getByText('Source not monitored').first().waitFor();
+  await mgr.getByRole('button', { name: 'Not relevant' }).click();
+  assert.match(await toast(mgr, /not relevant/), /not relevant/);
+  await mgr.getByRole('heading', { name: 'Recent checks' }).waitFor();
+  await shot(mgr, '17-desktop-missed');
+});
+
 await t('Empty, signed-out and turned-off states', async () => {
   const fresh = await mk('empty@ui.test', 'New Person', 'sales');
   const p = await ctx(fresh, 'iPhone 13');
   await p.goto(BASE + '#/mine');
   await p.getByText('No leads here yet').waitFor({ timeout: 15000 });
   await p.goto(BASE + '#/today');
-  await p.getByText('Claim a lead from Available to start your pipeline.').waitFor();
+  await p.getByText('Claim a lead from Available to start your call list.').waitFor();
   await p.goto(BASE + '#/print/mine');
   await p.getByText('You have no claimed leads yet').waitFor();
   await db.query(`update profiles set active=false where id=$1`, [fresh.id]);
