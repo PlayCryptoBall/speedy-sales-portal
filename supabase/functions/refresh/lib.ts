@@ -266,7 +266,7 @@ export function classify(sections: Section[], terms: Term[] = DEFAULT_TERMS, opt
   const services = new Set<string>();
   for (const { t, re } of compile(terms)) {
     for (const s of sections) {
-      const text = (s.text || '').toString();
+      const text = (s.text || '').toString().replace(/\s+/g, ' ');
       if (!text) continue;
       const m = re.exec(text);
       if (!m) continue;
@@ -451,7 +451,8 @@ const CAT_FED = 'Institutional & government';
 
 // ---------------------------------------------------------------- building permits (Socrata open data)
 export interface Permit { number: string; worktype: string; appType: string; address: string; owner: string; contractor: string; phone: string | null;
-  contractorAddress: string | null; value: number | null; status: string; processed: string | null; issued: string | null; project: string; sqft: number | null }
+  contractorAddress: string | null; value: number | null; status: string; processed: string | null; issued: string | null; project: string; sqft: number | null;
+  provider?: string | null }
 export function normalizeOrlandoPermit(r: any): Permit {
   const clean = (s: any) => String(s ?? '').replace(/\s+/g, ' ').trim();
   return {
@@ -462,7 +463,31 @@ export function normalizeOrlandoPermit(r: any): Permit {
     status: clean(r.application_status), processed: r.processed_date ? String(r.processed_date).slice(0, 10) : null,
     issued: r.issue_permit_date ? String(r.issue_permit_date).slice(0, 10) : null, project: clean(r.project_name),
     sqft: r.square_footage && Number(r.square_footage) > 0 ? Number(r.square_footage) : null,
+    provider: clean(r.private_provider_company_name) || null,
   };
+}
+// Permit names carry review-track codes ("Spc:", "Pp -", "Pexp:"); they mean nothing to a salesperson.
+export const cleanPermitName = (s: string) => {
+  let t = (s || '').trim();
+  for (let i = 0; i < 3; i++) t = t.replace(/^(?:spc|pp|pexp(?:pl)?|omd|pl)\b\s*[:\-]?\s*/i, '');
+  return t.trim();
+};
+// The contractor field sometimes holds the private inspection firm or "TBD" instead of the builder.
+export function builderOf(x: Permit): string | null {
+  const c = (x.contractor || '').trim();
+  if (!c || /^(?:tbd|n\/?a|none|owner|owner builder|unknown)$/i.test(c)) return null;
+  if (x.provider && c.toUpperCase().replace(/[^A-Z]/g, '') === x.provider.toUpperCase().replace(/[^A-Z]/g, '')) return null;
+  if (/\b(?:engineer\w*|inspect\w*|testing|professional solutions|consult\w*|expedit\w*|permit(?:ting)? services)\b/i.test(c)) return null;
+  return c;
+}
+// One lead per builder per owner (or per address when the owner is unknown): a program filed as several permits
+// (four restroom permits at one terminal, two buildings on one site) is one sales conversation, not four leads.
+export function groupPermits(list: Permit[]): Permit[][] {
+  const key = (x: Permit) => [(builderOf(x) || 'no builder').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+    (x.owner && x.owner.length > 3 ? x.owner : x.address).toUpperCase().replace(/[^A-Z0-9]/g, '')].join('|');
+  const g = new Map<string, Permit[]>();
+  for (const x of list) { const k = key(x); if (!g.has(k)) g.set(k, []); g.get(k)!.push(x); }
+  return [...g.values()].map(v => v.sort((a, b) => a.number.localeCompare(b.number)));
 }
 export function permitSections(x: Permit, url: string): Section[] {
   const work = /^alt/i.test(x.worktype) ? 'Commercial alteration' : /^add/i.test(x.worktype) ? 'Commercial building addition'
@@ -474,27 +499,33 @@ export function permitSections(x: Permit, url: string): Section[] {
     { field: 'property owner', text: x.owner, doc: `City of Orlando permit ${x.number}`, url },
   ];
 }
-export function permitPayload(x: Permit, cls: Classification, cfg: { city: string; county: string; source_id: string; key_prefix: string; dataset_url: string }) {
+export function permitPayload(x: Permit, cls: Classification, cfg: { city: string; county: string; source_id: string; key_prefix: string; dataset_url: string }, group: Permit[] = [x]) {
   const url = `${cfg.dataset_url}?permit_number=${encodeURIComponent(x.number)}`;
+  const total = group.reduce((t, g) => t + (g.value || 0), 0) || x.value;
+  const more = group.length > 1 ? ` (${group.length} permits)` : '';
   const stage = x.issued ? 'preconstruction' : 'permitting';
   const work = /^alt/i.test(x.worktype) ? 'alteration' : /^add/i.test(x.worktype) ? 'addition' : /^demo/i.test(x.worktype) ? 'demolition'
     : /^repair/i.test(x.worktype) ? 'repair' : 'new building';
-  const name = x.project ? titleCase(x.project) : `Commercial ${work}, ${titleCase(x.address)}`;
-  const money = x.value ? `$${Math.round(x.value).toLocaleString('en-US')}` : null;
-  const title = `${name}${x.project ? ` (${work}, ${titleCase(x.address)})` : ''}`.slice(0, 160);
-  const company = x.contractor ? titleCase(x.contractor.replace(/\s*\(.*$/, '')) : null;
+  const pname = cleanPermitName(x.project);
+  const name = pname ? titleCase(pname) : `Commercial ${work}, ${titleCase(x.address)}`;
+  const money = total ? `$${Math.round(total).toLocaleString('en-US')}` : null;
+  const title = `${name}${pname ? ` (${work}, ${titleCase(x.address)})` : ''}${more}`.slice(0, 160);
+  const builder = builderOf(x);
+  const company = builder ? titleCase(builder.replace(/\s*\(.*$/, '')) : null;
   return {
-    external_key: `${cfg.key_prefix}:${x.number}`, source_id: cfg.source_id, source_url: url, source_name: `City of ${cfg.city} permit data`,
+    external_key: `${cfg.key_prefix}:${x.number}`, alt_keys: group.slice(1).map(g => `${cfg.key_prefix}:${g.number}`),
+    source_id: cfg.source_id, source_url: url, source_name: `City of ${cfg.city} permit data`,
     solicitation_no: null, title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title,
     owner_name: x.owner ? titleCase(x.owner) : null, level: 'Private', city: cfg.city, county: cfg.county, region: regionForCounty(cfg.county),
     location_text: `${titleCase(x.address)}, ${cfg.city}`, stage,
-    status_text: `Commercial ${work} permit ${x.number}: ${x.status || 'filed'}${x.processed ? `, applied ${x.processed}` : ''}${x.issued ? `, issued ${x.issued}` : ''}`,
-    project_value: x.value, value_label: money ? `${money} permit valuation` : null, published_at: x.processed,
+    status_text: group.length > 1 ? `${group.length} commercial permits: ${group.map(g => `${g.number} (${g.status || 'filed'})`).join(', ')}`.slice(0, 400)
+      : `Commercial ${work} permit ${x.number}: ${x.status || 'filed'}${x.processed ? `, applied ${x.processed}` : ''}${x.issued ? `, issued ${x.issued}` : ''}`,
+    project_value: total, value_label: money ? `${money} permit valuation${more}` : null, published_at: x.processed,
     size_note: x.sqft ? `${x.sqft.toLocaleString('en-US')} sq ft` : null,
-    source_summary: `Permit ${x.number} (${x.appType}, ${x.worktype}) at ${titleCase(x.address)}. Contractor of record: ${company || 'not listed'}.`,
+    source_summary: `Permit ${group.map(g => g.number).join(', ')} (${x.appType}, ${x.worktype}) at ${titleCase(x.address)}. Contractor of record: ${company || (x.contractor ? `not a builder (${titleCase(x.contractor)})` : 'not listed')}.`,
     services_likely: cls.services, relevance: cls.relevance, relevance_score: cls.score, evidence: cls.evidence,
     category: cls.category, review_reason: cls.reason,
-    pocs: x.phone || x.contractor ? [{ name: company, title: 'Permit contractor of record', phone: x.phone, email: null }] : [],
+    pocs: company && x.phone ? [{ name: company, title: 'Permit contractor of record', phone: x.phone, email: null }] : [],
     opportunity: company ? {
       kind: 'private_project', approach: 'approach_prime', title: `${company} — ${name}`.slice(0, 200),
       company_name: company, company_phone: x.phone, company_address: x.contractorAddress,
@@ -502,7 +533,7 @@ export function permitPayload(x: Permit, cls: Classification, cfg: { city: strin
       services: cls.services,
     } : {
       kind: 'private_project', approach: 'approach_developer', title: name,
-      next_action: 'No contractor on the permit yet: call the owner to find out who is building it.', services: cls.services,
+      next_action: 'No builder named on the permit: call the owner or the permit applicant to find out who is building it.', services: cls.services,
     },
   };
 }

@@ -3,7 +3,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 import {
   classify, FDOT_BASE, FDOT_DISTRICTS, fdotPayload, groupNotices, isNoticeId, morePages, normalizeDetails, normalizeOfficial, normalizeOrlandoPermit,
-  normalizeSgs, normalizeUsa, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
+  normalizeSgs, normalizeUsa, groupPermits, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
   USA_NAICS, usaPayload, usaSearchBody,
 } from './lib.ts';
 import { DEFAULT_TERMS, type Term } from './terms.ts';
@@ -263,19 +263,23 @@ async function runPermits(run: Run, cfg: any, sourceId: string) {
   const rows = (await run.get(`${base}?${qs}`, 'application/json')) as any[];
   run.note(`${rows.length} commercial permits over $${Number(min).toLocaleString()} since ${since}`);
   const maxNew = cfg.max_new_per_run ?? 40;
+  const dataset = cfg.public_url ?? 'https://data.cityoforlando.net/resource/ryhf-m453.json';
+  const permits = rows.map(normalizeOrlandoPermit).filter(x => x.number);
+  run.counts.examined += permits.length;
   let newOnes = 0;
-  for (const r of rows) {
-    const x = normalizeOrlandoPermit(r);
-    run.counts.examined++;
-    if (!x.number) continue;
-    const dataset = cfg.public_url ?? 'https://data.cityoforlando.net/resource/ryhf-m453.json';
-    const cls = classify(permitSections(x, `${dataset}?permit_number=${encodeURIComponent(x.number)}`), run.terms, { value: x.value });
-    if (cls.relevance === 'low') { run.counts.low++; continue; }
-    run.counts.relevant++;
+  for (const group of groupPermits(permits)) {
+    const x = [...group].sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+    const sections = group.flatMap(g => permitSections(g, `${dataset}?permit_number=${encodeURIComponent(g.number)}`));
+    const cls = classify(sections, run.terms, { value: group.reduce((t, g) => t + (g.value || 0), 0) });
+    if (cls.relevance === 'low') { run.counts.low += group.length; continue; }
+    run.counts.relevant += group.length;
     if (newOnes >= maxNew) { run.note(`new-item cap of ${maxNew} reached; the rest wait for the next run`); break; }
     newOnes++;
-    await run.upsert(permitPayload(x, cls, { city: cfg.city ?? 'Orlando', county: cfg.county ?? 'Orange', source_id: sourceId,
-      key_prefix: sourceId.split('_')[0], dataset_url: dataset }));
+    const first = group[0];
+    const p = permitPayload({ ...x, number: first.number }, cls, { city: cfg.city ?? 'Orlando', county: cfg.county ?? 'Orange', source_id: sourceId,
+      key_prefix: sourceId.split('_')[0], dataset_url: dataset }, group);
+    if (group.length > 1) run.note(`${group.length} permits grouped as one lead: ${group.map(g => g.number).join(', ')}`);
+    await run.upsert(p);
   }
 }
 

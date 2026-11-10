@@ -231,5 +231,40 @@ await t('Next action follows the verified stage and route', () => {
   assert.match(L.nextActionFor('cancelled', 'watch'), /Cancelled/);
 });
 
+
+await t('Permits: one lead per builder and owner, inspection firms and "TBD" are not treated as builders, review codes stripped from names', () => {
+  const mkP = (n, extra) => L.normalizeOrlandoPermit({ ...permitRow, permit_number: n, ...extra });
+  const g = L.groupPermits([mkP('BLD2026-4', { project_name: 'SPC: BP-507 AIRSIDE RESTROOM REFURBISHMENT AS4', contractor_name: 'BALFOUR BEATTY CONSTRUCTION LLC', property_owner_name: 'GREATER ORLANDO AVIATION AUTHORITY', estimated_cost: '14052559' }),
+    mkP('BLD2026-3', { project_name: 'SPC: BP-507 AIRSIDE RESTROOM REFURBISHMENT AS3', contractor_name: 'BALFOUR BEATTY CONSTRUCTION LLC', property_owner_name: 'GREATER ORLANDO AVIATION AUTHORITY', estimated_cost: '14465583' }),
+    mkP('BLD2026-9', { project_name: 'PP - OUC LAKE HIGHLAND WATER TREATMENT PLT', contractor_name: 'UES PROFESSIONAL SOLUTIONS, LLC.', property_owner_name: 'ORLANDO UTILITIES COMMISSION' })]);
+  assert.equal(g.length, 2); assert.deepEqual(g[0].map(x => x.number), ['BLD2026-3', 'BLD2026-4']);
+  const cls = L.classify(g[0].flatMap(x => L.permitSections(x, '')));
+  const p = L.permitPayload(g[0][1], cls, { city: 'Orlando', county: 'Orange', source_id: 'orlando_permits', key_prefix: 'orlando', dataset_url: 'u' }, g[0]);
+  assert.match(p.title, /^Bp-507 Airside Restroom Refurbishment As4 .*\(2 permits\)$/); assert.equal(p.project_value, 28518142);
+  assert.deepEqual(p.alt_keys, ['orlando:BLD2026-4']);
+  assert.equal(L.builderOf(g[1][0]), null, 'an engineering / inspection firm is not the builder');
+  const q = L.permitPayload(g[1][0], cls, { city: 'Orlando', county: 'Orange', source_id: 'orlando_permits', key_prefix: 'orlando', dataset_url: 'u' });
+  assert.equal(q.opportunity.approach, 'approach_developer'); assert.equal(q.opportunity.company_name, undefined);
+  assert.equal(L.builderOf({ ...g[0][0], contractor: 'TBD' }), null);
+  assert.equal(L.cleanPermitName('Pp - OMD Blue Origin RTU Installation'), 'Blue Origin RTU Installation');
+});
+
+
+await t('Real SAM.gov records that were missed before are now caught (from the Nov 9 live audit)', () => {
+  const r = (title, d = '') => C(title, d).relevance;
+  assert.equal(r('Reconfigure and Modernize the 1600-member LTC Luis E. Martinez Army Reserve Center (ARC) in Perrine, FL'), 'potential');
+  assert.equal(r('Kissimmee River Restoration (KRR) Project, S-69 Weir Repair'), 'potential');
+  assert.equal(r('Avon Park Delta Ramp Repairs'), 'potential');
+  assert.equal(r('St. Lucie South Jetty Repair Industry Day'), 'potential');
+  assert.equal(r('Y1DZ--675-106 Expand Radiology & Oncology  Minor Construction - Lake Nona'), 'potential');
+  assert.equal(r('Y1DA--573-21-106 EHRM Infrastructure  Upgrades and Data Center Construction - Gainesville VAMC'), 'review');
+  assert.equal(r('(PROJ 675-24-106) BB Upgrade Lake Baldwin Pharmacy Hazardous Mixing Room - Construction'), 'review', '"Pharmacy" is not a pharmaceuticals purchase');
+  assert.equal(r('P110 Cape Canaveral Railhead and Transfer Facilities', 'FOR THE DESIGN-BID-BUILD (DBB) CONSTRUCTION PROJECT'), 'review');
+  assert.equal(r('Replace Elevators at FDC Miami'), 'review');
+  assert.equal(r('Everglades National Park, Flamingo Marina Bulkhead Rehabilitation', 'The project work includes the removal of the existing concrete cap'), 'high');
+  assert.equal(r('J045--FY 27 Grease Trap and Lift Station Maintenance'), 'low', 'a maintenance service contract is not a construction lead');
+  assert.equal(r('Hoist and Cranes Maintenance Services FY27'), 'low');
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

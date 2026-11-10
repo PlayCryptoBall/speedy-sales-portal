@@ -18,7 +18,7 @@ Security model: the browser holds only the project URL and the publishable key (
 ## Setup (one time)
 
 1. **Supabase**: create the organization and a project (Free plan is enough to start). Region `us-east-1`.
-2. **Database**: run `supabase/migrations/001` to `005`, then the generated legacy import (kept outside the repo), then `007_secrets.sql`, then `006_schedules.sql` with the functions URL filled in, then `008_team_metrics.sql`, `009_discovery.sql` and `010_discovery_schedules.sql`.
+2. **Database**: run `supabase/migrations/001` to `005`, then the generated legacy import (kept outside the repo), then `007_secrets.sql`, then `006_schedules.sql` with the functions URL filled in, then `008_team_metrics.sql`, `009_discovery.sql`, `010_discovery_schedules.sql` and `011_terms_update.sql`.
 3. **Edge functions**: deploy `admin-users` and `refresh` (both with JWT verification off; they check callers themselves). The scheduler secret and first-manager setup code live in the database, so no function secrets are required. Optional: `SAM_API_KEY`.
 4. **Auth settings** (Supabase dashboard, Authentication): turn off "Allow new users to sign up". Optional: raise "Email OTP expiration" so invite links last longer than 1 hour (max 24 h).
 5. **Web**: put the project URL and publishable key in `web/config.js`. GitHub: Settings, Pages, Source "GitHub Actions". The workflow in `.github/workflows/pages.yml` publishes `web/`.
@@ -38,7 +38,7 @@ Security model: the browser holds only the project URL and the publishable key (
 ```
 tests/reset_db.sh t1 && psql ... -d t1 -f <import.sql>     # same for t2 and t3
 node tests/workflows.test.mjs t1          # 31 database workflows: claim races, permissions, refresh safety, import, exports, team counts, discovery routing and matching
-node --experimental-strip-types tests/parsers.test.mjs t2   # 20: FDOT, SAM.gov, USAspending and permit parsers, classification scenarios
+node --experimental-strip-types tests/parsers.test.mjs t2   # 22: FDOT, SAM.gov, USAspending and permit parsers, classification scenarios, real missed records
 node tests/server.mjs t3 8787 & node tests/ui.test.mjs t3 8787 ./shots   # 21 browser tests, phone and desktop
 ```
 
