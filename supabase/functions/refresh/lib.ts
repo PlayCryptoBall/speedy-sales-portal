@@ -25,7 +25,7 @@ export function countyForCity(city?: string | null): string | null {
 }
 
 export function countyName(raw: string): string {
-  const s = (raw || '').trim().toUpperCase().replace(/ COUNTY$/, '');
+  const s = (raw || '').trim().toUpperCase().replace(/ COUNTY$/, '').replace(/^SAINT /, 'ST. ');
   const fix: Record<string, string> = { 'MIAMI DADE': 'Miami-Dade', 'DADE': 'Miami-Dade', 'ST JOHNS': 'St. Johns', 'ST. JOHNS': 'St. Johns',
     'ST LUCIE': 'St. Lucie', 'ST. LUCIE': 'St. Lucie', 'DESOTO': 'DeSoto', 'DE SOTO': 'DeSoto' };
   if (fix[s]) return fix[s];

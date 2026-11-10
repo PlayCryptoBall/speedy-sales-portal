@@ -258,7 +258,8 @@ async function runPermits(run: Run, cfg: any, sourceId: string) {
   const base = cfg.dataset ?? 'https://data.cityoforlando.net/resource/ryhf-m453.json';
   const where = `plan_review_type like 'Commercial%' AND application_type='Building Permit' AND estimated_cost >= ${Number(min)} ` +
     `AND processed_date > '${since}' AND worktype in ('Alteration','Addition','Repair','Demolition','Demo','New')`;
-  const qs = new URLSearchParams({ $where: where, $order: 'processed_date DESC', $limit: String(cfg.limit ?? 300) });
+  // Built by hand: the city's firewall rejects the same query when spaces are sent as "+" (URLSearchParams style).
+  const qs = `$where=${encodeURIComponent(where)}&$order=${encodeURIComponent('processed_date DESC')}&$limit=${Number(cfg.limit ?? 300)}`;
   const rows = (await run.get(`${base}?${qs}`, 'application/json')) as any[];
   run.note(`${rows.length} commercial permits over $${Number(min).toLocaleString()} since ${since}`);
   const maxNew = cfg.max_new_per_run ?? 40;

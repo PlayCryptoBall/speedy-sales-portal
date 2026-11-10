@@ -48,7 +48,7 @@ await t('Regions from counties and ZIP codes', () => {
   assert.equal(L.regionForZip('33039-1299'), 'Southeast FL'); assert.equal(L.regionForZip(null), 'Unknown');
   assert.equal(L.regionForZip('32114'), 'Central FL', 'Daytona Beach ZIPs are Central FL');
   assert.equal(Object.values(L.REGIONS).flat().length, 67, 'all 67 counties');
-  assert.equal(L.countyForCity('Kennedy Space Center'), 'Brevard'); assert.equal(L.countyForCity('ft. lauderdale'), 'Broward');
+  assert.equal(L.countyForCity('Kennedy Space Center'), 'Brevard'); assert.equal(L.regionForCounty('SAINT JOHNS'), 'Northeast FL'); assert.equal(L.countyName('Saint Lucie'), 'St. Lucie'); assert.equal(L.countyForCity('ft. lauderdale'), 'Broward');
 });
 
 await t('SAM.gov search: award notices map to the original solicitation; janitorial is skipped', () => {
