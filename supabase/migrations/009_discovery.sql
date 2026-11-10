@@ -65,7 +65,7 @@ alter table public.sources
   add column if not exists counties text[];
 
 update public.sources set category = 'Federal procurement', method = 'Public search API (JSON)', geography = 'Statewide (place of performance in Florida)',
-  project_types = 'Solicitations, pre-solicitations, sources sought, awards', schedule_note = 'Daily, early morning. Retries hourly up to 3 times after a failure.'
+  project_types = 'Solicitations, pre-solicitations, sources sought, awards', schedule_note = 'Daily at 4 AM Eastern. Retries hourly up to 3 times after a failure.'
  where id = 'sam_gov';
 update public.sources set category = 'State transportation', method = 'Public letting results pages (HTML)', geography = 'Statewide: Central Office, Districts 1-7, Turnpike',
   project_types = 'Road and bridge contracts after bid opening: every bidder, apparent low bidder',
