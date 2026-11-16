@@ -431,6 +431,33 @@ await t('Company profile, team report and missed-opportunity check', async () =>
   await shot(mgr, '17-desktop-missed');
 });
 
+await t('Early signals: a property sale shows with its buyer; tracking it opens a lead with the people behind it (phone)', async () => {
+  await db.query(`set role service_role`);
+  const run = (await db.query(`select public.refresh_start_run('orange_land_sales', 'test') r`)).rows[0].r;
+  await db.query(`select public.refresh_upsert_project($1, $2)`, [run, { external_key: 'ocsale:UITEST:2026-10-02', source_id: 'orange_land_sales',
+    title: 'Uitest Land Holdings LLC bought 9.5 acres of vacant land at 1 Sample Rd', level: 'Private', county: 'Orange', region: 'Central FL', stage: 'land',
+    relevance: 'review', published_at: '2026-10-02', source_summary: 'Qualified sale recorded by the property appraiser.', source_name: 'Orange County Property Appraiser sales',
+    source_url: 'https://ocpaweb.ocpafl.org/', size_note: '9.50 acres, zoned C-2', value_label: '$3,100,000 purchase price' }]);
+  await db.query(`select public.refresh_project_extras('ocsale:UITEST:2026-10-02', $1)`, [{ signal_type: 'land_sale', parcel_id: '000000000000009', acreage: 9.5,
+    stakeholders: [{ role: 'buyer', name: 'Uitest Land Holdings LLC', address: '1 Main St, Orlando FL', source: 'sale' }] }]);
+  await db.query(`reset role`);
+  const p = await ctx(A, 'iPhone 13');
+  await p.goto(BASE + '#/signals');
+  const card = p.locator('article.sig', { hasText: 'Uitest Land Holdings' });
+  await card.waitFor({ timeout: 15000 });
+  assert.match(await card.innerText(), /Land acquired[\s\S]*Buyer: Uitest Land Holdings LLC/);
+  await shot(p, '18-phone-signals');
+  await card.getByRole('button', { name: 'Track' }).click();
+  await toast(p, /Tracked/);
+  await drawer(p).getByRole('tab', { name: 'Project' }).click();
+  await drawer(p).getByRole('heading', { name: 'People and companies' }).waitFor({ timeout: 15000 });
+  assert.match(await drawer(p).locator('#pp_people').innerText(), /Buyer\s+Uitest Land Holdings LLC[\s\S]*Sunbiz/);
+  await shot(p, '19-phone-signal-lead');
+  const noScroll = await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1);
+  assert.ok(noScroll, 'no sideways scrolling on a phone');
+  await p.context().close();
+});
+
 await t('Empty, signed-out and turned-off states', async () => {
   const fresh = await mk('empty@ui.test', 'New Person', 'sales');
   const p = await ctx(fresh, 'iPhone 13');

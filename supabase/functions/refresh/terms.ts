@@ -53,6 +53,8 @@ export const DEFAULT_TERMS: Term[] = [
   d('reinforced concrete removal', String.raw`reinforced concrete (?:removal|demolition)|remov\w* (?:of )?(?:the )?(?:existing )?(?:reinforced concrete|rc) (?:slab|wall|deck|column|beam|footing|foundation)s?`, [BR, WI, WS]),
   d('scan before drilling or cutting', String.raw`(?:scan|scanning|x-?ray) (?:prior to|before) (?:coring|drilling|cutting|saw ?cutting)|(?:locate|locating) (?:rebar|reinforcing|post[- ]?tension\w*|utilities) (?:prior to|before)`, [GPR]),
   // ---- inferred scope (project types that usually need Speedy)
+  i('pavement grinding / smoothness', String.raw`(?:pavement|bump|profile|bridge deck) grind\w*|concrete pavement (?:rehab\w*|restoration|repair)|ride quality (?:correction|grinding)|smoothness (?:correction|requirements?)|\bcpr\b(?= (?:work|program|project))`, 2, [DG, SS], CAT.T),
+  i('polished concrete / floor preparation', String.raw`polished concrete|concrete polish\w*|floor (?:polish\w*|leveling|preparation|prep)|epoxy floor\w*|(?:floor )?coating removal|warehouse floor (?:repair|restoration)`, 2, [DG, SP], CAT.C),
   i('bridge replacement', String.raw`bridge replacement|replace (?:the )?(?:existing )?bridges?`, 2, [RB, WI, BR], CAT.T),
   i('bridge rehabilitation', String.raw`bridge (?:rehab\w*|repairs?|widening|improvements?|painting and repair)`, 2, [RB, WS, SS], CAT.T),
   i('expansion joints', String.raw`expansion joints?|joint (?:repair|replacement|rehabilitation)`, 2, [SS], CAT.T),

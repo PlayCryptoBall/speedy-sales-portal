@@ -44,6 +44,8 @@ const B = await mk('rep2@test.local', 'Test Rep Two', 'sales', true);
 const X = await mk('stranger@test.local', '', 'sales', false);    // signed up but never activated
 const m = await session(M), a = await session(A), b = await session(B), x = await session(X), anon = await session(null, 'anon');
 const svc = await session(null, 'service_role');
+// Scheduler tests simulate fixed days; runs other tests created at the real current time must not land inside those simulated mornings.
+const pushRunsBack = () => admin.query(`update refresh_runs set started_at = started_at - interval '10 years', finished_at = finished_at - interval '10 years' where started_at > '2026-01-01'`);
 const opp = async (where) => (await admin.query(`select z.* from (select o.*, p.external_key from opportunities o left join projects p on p.id = o.project_id) z where ${where} limit 1`)).rows[0];
 
 // ---------------------------------------------------------------- access control
@@ -621,6 +623,7 @@ await test('Saved searches and preferences are personal; notification preference
 
 await test('Morning schedule (Eastern time): collect once, retry failures, snapshot, alert only when incomplete, midday check', async () => {
   await admin.query(`delete from private.test_refresh_calls; delete from private.scheduler_steps; delete from morning_snapshots`);
+  await pushRunsBack();
   const auto = (await admin.query(`select id from sources where kind = 'automated' and enabled order by id`)).rows.map(r => r.id);
   const tick = async (iso) => (await admin.query(`select private.scheduler_tick($1::timestamptz) r`, [iso])).rows[0].r;
   const calls = async () => (await admin.query(`select source from private.test_refresh_calls order by id`)).rows.map(r => r.source);
@@ -661,6 +664,7 @@ await test('Morning schedule (Eastern time): collect once, retry failures, snaps
 
 await test('Missed morning step: the 5:15 check starts the collection itself; no false "not run" alarm', async () => {
   await admin.query(`delete from private.test_refresh_calls; delete from private.scheduler_steps where day = '2026-11-20'; delete from morning_snapshots where day = '2026-11-20'`);
+  await pushRunsBack();
   const auto = (await admin.query(`select id from sources where kind = 'automated' and enabled order by id`)).rows.map(r => r.id);
   const tick = async (iso) => (await admin.query(`select private.scheduler_tick($1::timestamptz) r`, [iso])).rows[0].r;
   assert.deepEqual((await tick('2026-11-20 05:40-05')).ran, ['verify'], 'collection starts; the snapshot waits for it');
@@ -674,6 +678,39 @@ await test('Missed morning step: the 5:15 check starts the collection itself; no
   for (const src of auto) await admin.query(`insert into refresh_runs (source_id, trigger, started_at, status, finished_at) values ($1, 'schedule', '2026-11-21 04:00-05', 'success', '2026-11-21 04:03-05')`, [src]);
   await tick('2026-11-21 07:05-05');
   assert.equal((await admin.query(`select status from morning_snapshots where day = '2026-11-21'`)).rows[0].status, 'ready');
+});
+
+await test('Early signals: a property sale and a later rezoning on the same parcel show as one story; tracking one makes a claimed lead', async () => {
+  const run = await svc.rpc('refresh_start_run', { p_source: 'orange_land_sales', p_trigger: 'test' });
+  const sale = { external_key: 'ocsale:TEST01:2026-10-01', source_id: 'orange_land_sales', title: 'Test Holdings LLC bought 8 acres of vacant land at 1 Test Rd',
+    level: 'Private', county: 'Orange', region: 'Central FL', stage: 'land', relevance: 'review', published_at: '2026-10-01', source_summary: 'Qualified sale' };
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: sale });
+  await svc.rpc('refresh_project_extras', { p_key: sale.external_key, p: { signal_type: 'land_sale', parcel_id: 'TEST-PARCEL-1', acreage: 8,
+    stakeholders: [{ role: 'buyer', name: 'Test Holdings LLC', address: '1 Main St', source: 'sale' }] } });
+  const rz = { ...sale, external_key: 'occase:TEST02', source_id: 'orange_dev_cases', title: 'Test Commons PD (Land Use Plan)', stage: 'planning', published_at: '2026-11-01' };
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: rz });
+  const r = await svc.rpc('refresh_project_extras', { p_key: rz.external_key, p: { signal_type: 'rezoning', parcel_id: 'TEST-PARCEL-1',
+    stakeholders: [{ role: 'engineer', name: 'Test Civil Inc', source: 'case' }, { role: 'buyer', name: 'TEST HOLDINGS, LLC', source: 'case' }] } });
+  assert.equal(r.same_parcel, 1);
+  // signed-out and inactive callers get nothing; the service-only function is closed to users
+  await anon.fails('early_signals', {}, /./); await x.fails('early_signals', {}, /not_authorized/);
+  await b.fails('refresh_project_extras', { p_key: rz.external_key, p: {} }, /permission denied/);
+  const list = await b.rpc('early_signals', { p: { days: 3650 } });
+  const mine = list.items.filter(i => /^Test /.test(i.title));
+  assert.equal(mine.length, 2); assert.equal(mine[0].signal_type, 'rezoning', 'newest first'); assert.equal(mine[0].same_parcel, 1);
+  assert.equal((await b.rpc('early_signals', { p: { days: 3650, type: 'land_sale', q: 'Test Holdings' } })).items.length, 1);
+  const pid = mine[1].id;
+  assert.equal((await opp(`project_id = '${pid}'`)), undefined, 'a sale is not a lead until someone tracks it');
+  const t1 = await b.rpc('track_signal', { p_project: pid });
+  assert.equal(t1.claimed, true);
+  const o = await opp(`id = '${t1.id}'`);
+  assert.equal(o.owner_id, B); assert.equal(o.approach, 'approach_developer'); assert.match(o.next_action, /Test Holdings LLC plans to build/);
+  const t2 = await a.rpc('track_signal', { p_project: pid });
+  assert.equal(t2.existing, true, 'a second person opens the same lead instead of creating another');
+  const people = await a.rpc('project_people', { p_project: mine[0].id });
+  assert.equal(people.related.length, 1); assert.equal(people.related[0].opp, t1.id);
+  assert.equal(people.stakeholders.length, 2, 'buyer named twice with different punctuation is kept once per record');
+  assert.equal((await b.rpc('early_signals', { p: { days: 3650, tracked: 'untracked', q: 'Test' } })).items.length, 1);
 });
 
 await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {

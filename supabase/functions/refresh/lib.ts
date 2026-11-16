@@ -537,3 +537,202 @@ export function permitPayload(x: Permit, cls: Classification, cfg: { city: strin
     },
   };
 }
+
+// ---------------------------------------------------------------- early signals (Mercator-style): who is planning to build, before permits
+// Stages follow the development timeline: land (bought) -> planning (entitlement: rezoning, comp plan) -> design (site plans,
+// master plans, design review) -> permitting -> construction. Early signals are kept as projects; only the ones whose text
+// names or strongly implies Speedy's work also become pool leads. The rest wait on the Early signals list until someone tracks one.
+export interface Stakeholder { role: 'owner' | 'buyer' | 'seller' | 'applicant' | 'developer' | 'engineer' | 'architect' | 'contractor' | 'agency_contact';
+  name: string; phone?: string | null; email?: string | null; address?: string | null; source: string; url?: string | null }
+const clean = (s: any) => String(s ?? '').replace(/\s+/g, ' ').trim();
+const ENGINEER = /\b(engineer\w*|civil|surveying|consult\w*|design group|planning|associates|& hutton|kimley|horn|dewberry|bowman|wsp|atkins|stantec|tetra tech|vhb|ghd|langan|thomas & hutton|kelly, collins)\b/i;
+const ARCHITECT = /\barchitect\w*|\baia\b|\bstudio\b/i;
+const ENTITY = /\b(llc|l\.l\.c|inc|corp\w*|company|co\.|lp|l\.p|ltd|llp|trust|partners\w*|holdings?|properties|development|ventures?|group|investments?|fund|reit|church|university|school|county|city of|authority|district)\b/i;
+// "Firm Name (Contact Person) (Contact Person)" -> firm and person
+export function splitApplicant(raw: string): { firm: string; person: string | null } {
+  const s = clean(raw);
+  const m = s.match(/^(.*?)\s*\(([^()]+)\)/);
+  if (!m) return { firm: s, person: null };
+  return { firm: m[1].replace(/,\s*$/, '').trim() || m[2].trim(), person: m[1].trim() ? m[2].trim() : null };
+}
+export function applicantRole(firm: string): Stakeholder['role'] {
+  if (ARCHITECT.test(firm)) return 'architect';
+  if (ENGINEER.test(firm)) return 'engineer';
+  return ENTITY.test(firm) ? 'developer' : 'applicant';
+}
+const earlyStageAction = (stage: string, who: string | null) => stage === 'land'
+  ? `Property just changed hands. Find out what ${who || 'the buyer'} plans to build or renovate, and who their GC will be.`
+  : stage === 'planning'
+    ? `Entitlement stage. Introduce Speedy to ${who || 'the applicant'} and ask who will build it; check back when site plans are filed.`
+    : `Design stage. Ask ${who || 'the applicant'} for the GC and civil engineer, and offer scanning, coring and cutting for demolition and tie-ins.`;
+
+// City of Orlando "Planning Applications" (Socrata bhxy-4rji)
+export interface PlanningApp { number: string; name: string; type: string; status: string; address: string; applied: string | null; lastAction: string | null;
+  approved: string | null; comments: string; parcel: string | null; applicant: string }
+export function normalizeOrlandoPlanning(r: any): PlanningApp {
+  return { number: clean(r.application_number), name: clean(r.application_name), type: clean(r.application_description), status: clean(r.application_status),
+    address: clean(r.address), applied: r.application_date ? String(r.application_date).slice(0, 10) : null,
+    lastAction: r.last_action_date ? String(r.last_action_date).slice(0, 10) : null, approved: r.approval_date ? String(r.approval_date).slice(0, 10) : null,
+    comments: clean(r.application_comments), parcel: clean(r.parcel_id) || null, applicant: clean(r.applicant) };
+}
+const PLAN_ALWAYS = /^(master plan|conditional use permit|zoning|growth management plan|appearance review board)$/i;
+const PLAN_IF_SUBSTANTIVE = /^(pre application meeting|determination|historic preservation board|modification of standards|subdivision)$/i;
+// Commercial, institutional, industrial or multi-family building work, as opposed to a fence, sign, porch or a single house.
+const SUBSTANTIVE = /\b(\d{2,}[,\d]* ?(?:sf|sq\.? ?ft|square feet)|\d{2,} (?:units?|du|rooms?|keys|beds?)|commercial|office|retail|restaurant|hotel|warehouse|industrial|manufactur\w*|hospital|medical|clinic|school|church|apartments?|multi-?family|mixed[- ]use|parking (?:garage|structure|deck)|redevelop\w*|demoli\w*|renovat\w*|addition|new building|tower|stor(?:y|ies)|data center|lab(?:oratory)?|dealership|showroom|terminal|hangar)\b/i;
+const PLAN_SKIP = /\b(sign(?:age)?|fence|wall sign|porch|deck|pool|shed|carport|single[- ]family (?:home|residence)|accessory dwelling|adu|garage apartment|window replacement|paint\w*|roof replacement|tree removal|lot split)\b/i;
+export function planningWanted(a: PlanningApp): boolean {
+  const text = `${a.name} ${a.comments}`;
+  if (!a.number || /^(variances?|street name change|abandonment)$/i.test(a.type)) return false;
+  if (PLAN_ALWAYS.test(a.type)) return !PLAN_SKIP.test(a.name) || SUBSTANTIVE.test(text);
+  if (PLAN_IF_SUBSTANTIVE.test(a.type)) return SUBSTANTIVE.test(text) && !(/^historic/i.test(a.type) && PLAN_SKIP.test(a.name) && !/renovat|addition|demoli|restor/i.test(text));
+  return false;
+}
+export const planningStage = (type: string) => /^(zoning|growth management plan)$/i.test(type) ? 'planning' : 'design';
+export function planningSections(a: PlanningApp, url: string): Section[] {
+  const doc = `City of Orlando planning application ${a.number}`;
+  return [{ field: 'application name', text: a.name, doc, url }, { field: 'staff notes', text: a.comments, doc, url }];
+}
+export function planningPayload(a: PlanningApp, cls: Classification, cfg: { source_id: string; dataset_url: string }) {
+  const url = `${cfg.dataset_url}?application_number=${encodeURIComponent(a.number)}`;
+  const stage = planningStage(a.type);
+  const { firm, person } = splitApplicant(a.applicant);
+  const role = applicantRole(firm);
+  const who = firm ? titleCase(firm) : null;
+  const name = a.name && !/^(pre application meeting|determination)$/i.test(a.name) ? a.name : `${a.type} at ${titleCase(a.address)}`;
+  const title = `${name} (${a.type}, ${titleCase(a.address)})`.slice(0, 160);
+  const units = (a.comments.match(/(\d[\d,]*) (?:units?|du)\b/i) || [])[1];
+  const sf = (a.comments.match(/(\d[\d,]*) ?(?:sf|sq\.? ?ft|square feet)\b/i) || [])[1];
+  const stakeholders: Stakeholder[] = firm ? [{ role, name: who!, address: null, source: 'planning application', url }] : [];
+  if (person && firm) stakeholders.push({ role: 'applicant', name: titleCase(person), source: 'planning application', url });
+  const p: Record<string, unknown> = {
+    external_key: `orlplan:${a.number}`, source_id: cfg.source_id, source_url: url, source_name: 'City of Orlando planning applications',
+    title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title, owner_name: role === 'developer' ? who : null, level: 'Private',
+    city: 'Orlando', county: 'Orange', region: regionForCounty('Orange'), location_text: `${titleCase(a.address)}, Orlando`, stage,
+    status_text: `${a.type} ${a.number}: ${a.status || 'filed'}${a.applied ? `, filed ${a.applied}` : ''}${a.approved ? `, approved ${a.approved}` : ''}${a.lastAction ? `, last action ${a.lastAction}` : ''}`,
+    published_at: a.applied || a.lastAction, size_note: [units && `${units} units`, sf && `${sf} sq ft`].filter(Boolean).join(', ') || null,
+    source_summary: `${a.type}: ${a.comments || a.name}`.slice(0, 600),
+    services_likely: cls.services, relevance: cls.relevance, relevance_score: cls.score, evidence: cls.evidence, category: cls.category,
+    review_reason: cls.reason,
+    extras: { stakeholders, parcel_id: a.parcel, signal_type: /^(zoning|growth management plan)$/i.test(a.type) ? 'rezoning' : 'site_plan' },
+  };
+  if (cls.relevance === 'high' || cls.relevance === 'potential') {
+    p.opportunity = { kind: 'private_project', approach: 'approach_developer', title: `${who ? who + ' — ' : ''}${name}`.slice(0, 200),
+      company_name: role === 'developer' ? who : null, next_action: earlyStageAction(stage, who), services: cls.services };
+  }
+  return p;
+}
+
+// Orange County public-notice development and zoning cases (ocgis4 Public_Notification layers 0 and 2)
+export interface CountyCase { id: string; type: string; name: string; applicant: string; description: string; acreage: string | null; parcels: string | null;
+  proposedZoning: string | null; communityMeeting: string | null; hearing: string | null; staff: string | null; staffPhone: string | null; staffEmail: string | null; reference: string | null }
+export function normalizeCountyCase(a: any): CountyCase {
+  return { id: clean(a.FOLDERRSN), type: clean(a.FOLDERTYPE), name: clean(a.FOLDERNAME), applicant: clean(a.APPLICANT), description: clean(a.FOLDERDESCRIPTION),
+    acreage: clean(a.ACREAGE) || null, parcels: clean(a.PARCELID_STR) || null, proposedZoning: clean(a.PROPOSED_ZONING) || null,
+    communityMeeting: clean(a.COMMUNITY_MEETING) || null, hearing: clean(a.BCC_MEETING) || null, staff: clean(a.USERNAME) || null,
+    staffPhone: clean(a.USERPHONE) || null, staffEmail: clean(a.EMAILADDRESS) || null, reference: clean(a.REFERENCEFILE) || null };
+}
+export function countyCaseWanted(c: CountyCase): boolean {
+  if (!c.id) return false;
+  if (/^(VA|SE)\b/.test(c.type)) return SUBSTANTIVE.test(c.description) && !/result of (?:a )?code/i.test(c.description) && !PLAN_SKIP.test(c.description.slice(0, 120));
+  return true;
+}
+export const countyCaseStage = (type: string) => /^(RZ|LUP|FLUMA|SS|CP|PD)\b|rezon|land use|amendment/i.test(type) && !/^(DP|CDR|PSP)\b/.test(type) ? 'planning' : 'design';
+export function countyCasePayload(c: CountyCase, cls: Classification, cfg: { source_id: string; url: string }) {
+  const stage = countyCaseStage(c.type);
+  const { firm, person } = splitApplicant(c.applicant);
+  const role = applicantRole(firm);
+  const who = firm ? titleCase(firm) : null;
+  const typeLabel = c.type.replace(/^[A-Z]{2,5}\s+/, '');
+  const title = `${c.name} (${typeLabel})`.slice(0, 160);
+  const stakeholders: Stakeholder[] = [];
+  if (firm) stakeholders.push({ role, name: who!, source: 'Orange County case', url: cfg.url });
+  if (person) stakeholders.push({ role: 'applicant', name: titleCase(person), source: 'Orange County case', url: cfg.url });
+  if (c.staff) stakeholders.push({ role: 'agency_contact', name: titleCase(c.staff), phone: c.staffPhone, email: c.staffEmail, source: 'Orange County case planner', url: cfg.url });
+  const acres = c.acreage && /\d/.test(c.acreage) ? c.acreage.replace(/^(\d*\.\d{2})\d+$/, '$1') : null;
+  const p: Record<string, unknown> = {
+    external_key: `occase:${c.id}`, source_id: cfg.source_id, source_url: cfg.url, source_name: 'Orange County development and zoning cases',
+    title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title, owner_name: role === 'developer' ? who : null, level: 'Private',
+    county: 'Orange', region: regionForCounty('Orange'), location_text: `${c.name}, Orange County`, stage,
+    status_text: `${c.type}${c.reference ? ` (${c.reference})` : ''}: on public notice${c.communityMeeting ? `, community meeting ${c.communityMeeting}` : ''}${c.hearing ? `, commission hearing ${c.hearing}` : ''}`,
+    size_note: [acres && `${acres} acres`, c.proposedZoning && `proposed zoning ${c.proposedZoning}`].filter(Boolean).join(', ') || null,
+    source_summary: `${typeLabel}: ${c.description}`.slice(0, 600),
+    services_likely: cls.services, relevance: cls.relevance, relevance_score: cls.score, evidence: cls.evidence, category: cls.category, review_reason: cls.reason,
+    extras: { stakeholders, parcel_id: (c.parcels || '').split(',')[0].trim() || null, signal_type: stage === 'planning' ? 'rezoning' : 'site_plan',
+      acreage: acres ? Number(acres.replace(/[^\d.]/g, '')) || null : null },
+  };
+  if (cls.relevance === 'high' || cls.relevance === 'potential') {
+    p.opportunity = { kind: 'private_project', approach: 'approach_developer', title: `${who ? who + ' — ' : ''}${c.name}`.slice(0, 200),
+      company_name: role === 'developer' ? who : null, next_action: earlyStageAction(stage, who), services: cls.services };
+  }
+  return p;
+}
+
+// Orange County Property Appraiser qualified sales (ocgis4 AGOL_Open_Data layer 56). One record per buyer, date and price:
+// a 21-unit building sold in one deal shows as 21 parcels with the same price.
+export interface LandSale { parcel: string; buyer: string; buyer2: string | null; mail: string; date: string; price: number; dor: string; acres: number;
+  zoning: string | null; address: string; city: string | null; built: number | null; area: number | null; market: number | null }
+export function normalizeSale(a: any): LandSale {
+  const d = a.SALE_DATE ? new Date(Number(a.SALE_DATE)).toISOString().slice(0, 10) : '';
+  return { parcel: clean(a.PARCEL), buyer: clean(a.NAME1), buyer2: clean(a.NAME2) || null, mail: [a.ADD1, a.ADD2, a.ADD3].map(clean).filter(Boolean).join(', '),
+    date: d, price: Number(a.SALE_ADJ_VALUE) || 0, dor: clean(a.DOR_CODE), acres: Number(a.ACREAGE) || 0, zoning: clean(a.ZONING_CODE) || null,
+    address: clean(a.SITUS), city: clean(a.CITY_SITUS) && !/^un-?incorporated$/i.test(clean(a.CITY_SITUS)) ? titleCase(clean(a.CITY_SITUS)) : null,
+    built: Number(a.AYB) > 0 ? Number(a.AYB) : null, area: Number(a.GROSS_AREA) > 0 ? Number(a.GROSS_AREA) : null, market: Number(a.TOTAL_MKT) || null };
+}
+// Florida DOR use codes (first two digits): 00 vacant residential, 01-09 residential, 10 vacant commercial, 11-39 commercial,
+// 40 vacant industrial, 41-49 industrial, 70 vacant institutional, 71-79 institutional, 80-89 government.
+export function saleKind(dor: string): 'vacant' | 'commercial' | 'industrial' | 'institutional' | 'residential' | 'other' {
+  const c = parseInt((dor || '').slice(0, 2), 10);
+  if ([10, 40, 70].includes(c)) return 'vacant';
+  if (c === 0) return 'vacant';
+  if (c >= 11 && c <= 39) return 'commercial';
+  if (c >= 41 && c <= 49) return 'industrial';
+  if (c >= 71 && c <= 89) return 'institutional';
+  if (c >= 1 && c <= 9) return 'residential';
+  return 'other';
+}
+export function groupSales(list: LandSale[]): LandSale[][] {
+  const g = new Map<string, LandSale[]>();
+  for (const s of list) { const k = `${s.buyer.toUpperCase()}|${s.date}|${Math.round(s.price)}`; if (!g.has(k)) g.set(k, []); g.get(k)!.push(s); }
+  return [...g.values()];
+}
+// A sale is an early signal when an entity buys land to build on, or buys a commercial, industrial or institutional building
+// big enough to be renovated or torn down. Apartment trades, condos and houses are not.
+export function saleWanted(group: LandSale[], cfg: { min_price?: number; min_vacant_acres?: number } = {}): boolean {
+  const s = group[0];
+  const kinds = new Set(group.map(x => saleKind(x.dor)));
+  const acres = group.reduce((t, x) => t + x.acres, 0);
+  if (!ENTITY.test(s.buyer) || /\b(county|city of|school board|state of florida|united states)\b/i.test(s.buyer)) return false;
+  if (kinds.has('residential') && !kinds.has('commercial') && !kinds.has('industrial') && !kinds.has('vacant')) return false;
+  if (s.price < (cfg.min_price ?? 1_500_000)) return false;
+  if (kinds.has('vacant')) return group.some(x => [10, 40, 70].includes(parseInt(x.dor.slice(0, 2), 10))) || acres >= (cfg.min_vacant_acres ?? 5);
+  return kinds.has('commercial') || kinds.has('industrial') || kinds.has('institutional');
+}
+export function salePayload(group: LandSale[], cfg: { source_id: string }) {
+  const s = [...group].sort((a, b) => b.acres - a.acres)[0];
+  const acres = group.reduce((t, x) => t + x.acres, 0);
+  const kinds = [...new Set(group.map(x => saleKind(x.dor)))];
+  const vacant = kinds.includes('vacant');
+  const buyer = titleCase(s.buyer.replace(/\s+\d+% INT\b.*$/i, ''));
+  const money = `$${Math.round(s.price).toLocaleString('en-US')}`;
+  const where = s.address ? titleCase(s.address.replace(/\s+UNIT\s+\S+$/i, '')) : `parcel ${s.parcel}`;
+  const what = vacant ? `${acres.toFixed(acres < 10 ? 1 : 0)} acres of ${kinds.length > 1 ? 'land' : 'vacant land'}` : `${kinds[0]} property${s.area ? ` (${s.area.toLocaleString('en-US')} sq ft${s.built ? `, built ${s.built}` : ''})` : ''}`;
+  const title = `${buyer} bought ${what} at ${where}`.slice(0, 160);
+  const url = `https://ocpaweb.ocpafl.org/parcelsearch/Parcel%20ID/${s.parcel}`;
+  return {
+    external_key: `ocsale:${s.parcel}:${s.date}`, alt_keys: group.slice(1).map(x => `ocsale:${x.parcel}:${x.date}`),
+    source_id: cfg.source_id, source_url: url, source_name: 'Orange County Property Appraiser sales',
+    title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title, owner_name: buyer, level: 'Private',
+    city: s.city, county: 'Orange', region: regionForCounty('Orange'), location_text: `${where}${s.city ? ', ' + s.city : ', Orange County'}`, stage: 'land',
+    status_text: `Sold ${s.date} for ${money}${group.length > 1 ? ` (${group.length} parcels in one sale)` : ''}. Zoning ${s.zoning || 'not listed'}.`,
+    project_value: null, value_label: `${money} purchase price`, published_at: s.date,
+    size_note: `${acres.toFixed(2)} acres${s.zoning ? `, zoned ${s.zoning}` : ''}`,
+    source_summary: `Qualified sale recorded by the Orange County Property Appraiser. Buyer: ${buyer}${s.buyer2 ? ` / ${titleCase(s.buyer2)}` : ''}. Buyer mailing address: ${titleCase(s.mail)}. ` +
+      (vacant ? 'Vacant land bought by a company usually means a building is planned.' : 'A commercial building bought by an investor is often renovated, re-tenanted or redeveloped.'),
+    services_likely: vacant ? [] : ['Selective demolition', 'Core drilling', 'Slab sawing', 'GPR scanning'],
+    relevance: 'review', relevance_score: 0, evidence: [], category: CAT_PRIVATE,
+    review_reason: 'Early signal: property sale. Nothing is filed yet, so no scope is confirmed.',
+    extras: { stakeholders: [{ role: 'buyer', name: buyer, address: titleCase(s.mail), source: 'property appraiser sale record', url }],
+      parcel_id: s.parcel, signal_type: 'land_sale', acreage: Math.round(acres * 100) / 100 },
+  };
+}
+const CAT_PRIVATE = 'Private development';

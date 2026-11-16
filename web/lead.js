@@ -78,6 +78,7 @@
     const body = { overview, activity, contacts, project, source }[tab](o);
     P.drawer.set(`<div class="dw-head">${head}${ownbar(o)}${tabs}</div><div class="dw-body" id="lp_body" role="tabpanel" aria-labelledby="lt_${tab}">${alerts(o)}${body}</div>`, { keepScroll });
     P.state.log = { kind: 'call', outcome: null };
+    if (tab === 'project' && o.project?.id) { const el = document.getElementById('pp_people'); if (el) P.peopleSection(o.project.id, el); }
   }
   P.act.leadTab = (el) => { P.state.leadTab = el.dataset.tab; render(); document.getElementById('lt_' + el.dataset.tab)?.focus(); };
   P.act.logTab = () => { P.state.leadTab = 'activity'; render(); setTimeout(() => document.getElementById('lg_body')?.focus(), 30); };
@@ -252,7 +253,7 @@
     const p = o.project;
     if (!p) return '<p class="muted">No project record is linked to this lead.</p>';
     const bidders = (p.bidders || []).length > 1 ? `<details class="plain" style="margin-top:8px"><summary>All ${p.bidders.length} bidders</summary><ol class="small" style="margin:8px 0 0;padding-left:20px">${p.bidders.map(b => `<li>${esc(b.name)}${b.amount ? ' · ' + esc(P.money(b.amount)) : ''}</li>`).join('')}</ol></details>` : '';
-    return `<div class="panel"><h3>Project details</h3><dl class="facts">
+    return `<div id="pp_people"></div><div class="panel"><h3>Project details</h3><dl class="facts">
         <dt>Project</dt><dd>${esc(p.title)}</dd>
         <dt>Owner or agency</dt><dd>${p.owner_name ? esc(p.owner_name) : P.unknown()}${p.level ? `<div class="sub">${esc(p.level)}</div>` : ''}</dd>
         <dt>Location</dt><dd>${esc(p.location_text || '')}${p.location_text ? '<br>' : ''}<span class="sub">${esc(P.place(p))}</span></dd>

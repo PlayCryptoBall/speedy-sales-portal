@@ -4,7 +4,8 @@ import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 import {
   classify, FDOT_BASE, FDOT_DISTRICTS, fdotPayload, groupNotices, isNoticeId, morePages, normalizeDetails, normalizeOfficial, normalizeOrlandoPermit,
   normalizeSgs, normalizeUsa, groupPermits, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
-  USA_NAICS, usaPayload, usaSearchBody,
+  USA_NAICS, usaPayload, usaSearchBody, normalizeOrlandoPlanning, planningWanted, planningSections, planningPayload,
+  normalizeCountyCase, countyCaseWanted, countyCasePayload, normalizeSale, groupSales, saleWanted, salePayload,
 } from './lib.ts';
 import { DEFAULT_TERMS, type Term } from './terms.ts';
 
@@ -48,8 +49,13 @@ class Run {
     }
   }
   async upsert(p: Record<string, unknown>) {
-    const { data, error } = await db.rpc('refresh_upsert_project', { p_run: this.id, p });
+    const { extras, ...facts } = p as any;
+    const { data, error } = await db.rpc('refresh_upsert_project', { p_run: this.id, p: facts });
     if (error) { this.counts.errors++; this.note(`save ${p.external_key} failed: ${error.message}`); return null; }
+    if (extras) {
+      const r = await db.rpc('refresh_project_extras', { p_key: facts.external_key, p: extras });
+      if (r.error) this.note(`stakeholders for ${facts.external_key} not saved: ${r.error.message}`);
+    }
     this.counts.fetched++;
     if (data.action === 'discovered') this.counts.discovered++;
     else if (data.action === 'updated') this.counts.updated++;
@@ -283,6 +289,90 @@ async function runPermits(run: Run, cfg: any, sourceId: string) {
   }
 }
 
+// ---------------------------------------------------------------- early signals: planning, development cases, land sales
+async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
+  const days = cfg.lookback_days ?? 60;
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const base = cfg.dataset ?? 'https://data.cityoforlando.net/resource/bhxy-4rji.json';
+  const where = `last_action_date > '${since}' AND application_description not in ('Variances','Street Name Change','Abandonment')`;
+  const qs = `$where=${encodeURIComponent(where)}&$order=${encodeURIComponent('last_action_date DESC')}&$limit=${Number(cfg.limit ?? 400)}`;
+  const rows = (await run.get(`${base}?${qs}`, 'application/json')) as any[];
+  const apps = rows.map(normalizeOrlandoPlanning);
+  run.counts.examined += apps.length;
+  const keep = apps.filter(planningWanted);
+  run.note(`${rows.length} planning applications with activity since ${since}; ${keep.length} describe commercial, institutional or multi-family building work`);
+  const maxNew = cfg.max_new_per_run ?? 60;
+  let n = 0;
+  for (const a of keep) {
+    if (run.timeUp()) { run.note('time budget reached; the rest wait for the next run'); break; }
+    if (n++ >= maxNew) { run.note(`cap of ${maxNew} reached; the rest wait for the next run`); break; }
+    const url = `${base}?application_number=${encodeURIComponent(a.number)}`;
+    const cls = classify(planningSections(a, url), run.terms);
+    if (cls.excluded) { run.counts.low++; continue; }
+    if (cls.relevance === 'high' || cls.relevance === 'potential') run.counts.relevant++;
+    await run.upsert(planningPayload(a, cls, { source_id: sourceId, dataset_url: base }));
+  }
+}
+
+async function runCountyCases(run: Run, cfg: any, sourceId: string) {
+  const base = cfg.service ?? 'https://ocgis4.ocfl.net/arcgis/rest/services/Public_Notification/MapServer';
+  // Date fields break this county service's queries, so the fields are named one by one.
+  const fields = 'FOLDERRSN,FOLDERTYPE,FOLDERNAME,APPLICANT,FOLDERDESCRIPTION,ACREAGE,PARCELID_STR,PROPOSED_ZONING,COMMUNITY_MEETING,BCC_MEETING,USERNAME,USERPHONE,EMAILADDRESS,REFERENCEFILE';
+  const page = cfg.public_url ?? 'https://fasttrack.ocfl.net/OnlineServices/DevelopmentCases.aspx';
+  for (const layer of (cfg.layers ?? [0, 2]) as number[]) {
+    let rows: any[] = [];
+    try {
+      const j = await run.get(`${base}/${layer}/query?where=1%3D1&outFields=${fields}&returnGeometry=false&f=json`, 'application/json');
+      if (j?.error) throw new Error(j.error.message || 'query failed');
+      rows = (j.features || []).map((f: any) => f.attributes);
+    } catch (e) {
+      // the planner contact fields are sometimes missing; retry with the case fields only
+      run.note(`layer ${layer}: ${(e as Error).message}; retrying without staff contact fields`);
+      const j = await run.get(`${base}/${layer}/query?where=1%3D1&outFields=${fields.replace(',USERNAME,USERPHONE,EMAILADDRESS,REFERENCEFILE', '')}&returnGeometry=false&f=json`, 'application/json');
+      if (j?.error) throw new Error(`layer ${layer}: ${j.error.message || 'query failed'}`);
+      rows = (j.features || []).map((f: any) => f.attributes);
+    }
+    const cases = rows.map(normalizeCountyCase);
+    run.counts.examined += cases.length;
+    const keep = cases.filter(countyCaseWanted);
+    run.note(`layer ${layer}: ${cases.length} cases on public notice, ${keep.length} kept`);
+    for (const c of keep) {
+      const cls = classify([{ field: 'case description', text: `${c.name}. ${c.description}`, doc: `Orange County case ${c.reference || c.id}`, url: page }], run.terms);
+      if (cls.excluded) { run.counts.low++; continue; }
+      if (cls.relevance === 'high' || cls.relevance === 'potential') run.counts.relevant++;
+      await run.upsert(countyCasePayload(c, cls, { source_id: sourceId, url: page }));
+    }
+  }
+}
+
+async function runLandSales(run: Run, cfg: any, sourceId: string) {
+  const days = cfg.lookback_days ?? 75;   // the appraiser posts sales a few weeks after they close
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const minPrice = Number(cfg.min_price ?? 1_500_000);
+  const base = cfg.layer ?? 'https://ocgis4.ocfl.net/arcgis/rest/services/AGOL_Open_Data/MapServer/56';
+  const where = `SALE_DATE >= DATE '${since}' AND SALE_ADJ_VALUE >= ${minPrice}`;
+  const fields = 'PARCEL,NAME1,NAME2,ADD1,ADD2,ADD3,SALE_DATE,SALE_ADJ_VALUE,DOR_CODE,ACREAGE,ZONING_CODE,SITUS,CITY_SITUS,AYB,GROSS_AREA,TOTAL_MKT';
+  const rows: any[] = [];
+  for (let offset = 0; offset < 4000; offset += 1000) {
+    const j = await run.get(`${base}/query?where=${encodeURIComponent(where)}&outFields=${fields}&returnGeometry=false&orderByFields=OBJECTID&resultOffset=${offset}&resultRecordCount=1000&f=json`, 'application/json');
+    if (j?.error) throw new Error(j.error.message || 'query failed');
+    rows.push(...(j.features || []).map((f: any) => f.attributes));
+    if (!j.exceededTransferLimit && (j.features || []).length < 1000) break;
+  }
+  const sales = rows.map(normalizeSale).filter(s => s.parcel && s.date);
+  run.counts.examined += sales.length;
+  const groups = groupSales(sales).filter(g => saleWanted(g, cfg));
+  const latest = sales.reduce((m, s) => s.date > m ? s.date : m, '');
+  run.note(`${sales.length} sales of $${minPrice.toLocaleString()}+ since ${since} (latest posted sale ${latest || 'none'}); ${groups.length} are land or commercial buildings bought by companies`);
+  const maxNew = cfg.max_new_per_run ?? 60;
+  let n = 0;
+  for (const g of groups.sort((a, b) => b[0].price - a[0].price)) {
+    if (run.timeUp() || n++ >= maxNew) { run.note('cap reached; the rest wait for the next run'); break; }
+    run.counts.relevant++;
+    await run.upsert(salePayload(g, { source_id: sourceId }));
+  }
+}
+
 async function loadTerms(run: Run) {
   const { data, error } = await db.rpc('discovery_terms');
   if (error || !Array.isArray(data) || !data.length) { run.note(`using built-in search terms (${error?.message || 'none saved'})`); return; }
@@ -305,6 +395,9 @@ async function runSource(source: string, trigger: string, user: string | null, a
     else if (source === 'sam_gov') await runSam(run, cfg);
     else if (source === 'usaspending_awards') await runUsaspending(run, cfg);
     else if (source.endsWith('_permits')) await runPermits(run, cfg, source);
+    else if (source === 'orlando_planning') await runOrlandoPlanning(run, cfg, source);
+    else if (source === 'orange_dev_cases') await runCountyCases(run, cfg, source);
+    else if (source === 'orange_land_sales') await runLandSales(run, cfg, source);
     else throw new Error('no automated job for this source');
     if (run.counts.errors > 0) status = run.counts.fetched > 0 ? 'partial' : 'failed';
     if (status === 'failed') err = run.log.filter(l => /failed/.test(l)).slice(-1)[0] || 'every request failed';
@@ -422,7 +515,7 @@ Deno.serve(async (req) => {
   const work = (async () => {
     if (source === 'retry_failed') return retryFailed();
     if (source === 'maintenance') return db.rpc('daily_maintenance');
-    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits'] : [source];
+    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales'] : [source];
     const out = [];
     for (const s of list) out.push(await runSource(s, trigger, auth.user));
     return out;

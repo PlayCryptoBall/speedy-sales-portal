@@ -16,7 +16,8 @@ Built from speedycon.com/service/ and speedycon.com/projects/ (reviewed Nov 2026
 | Robotic Demolition | Remote-controlled demolition | robotic demolition, Brokk | demolition, selective demolition |
 | Breaking and Removal | Concrete breaking and haul-off, reinforced concrete removal | concrete removal, slab/sidewalk/pavement removal, reinforced concrete removal | demolition, pavement replacement, seawalls |
 | GPR Scanning | Locating rebar, post-tension cables and conduits before drilling or cutting | GPR, ground-penetrating radar, concrete scanning, scan before coring | post-tensioned structures, hospital and lab renovations, parking garages |
-| Related: selective demolition, diamond grinding, surface preparation | Interior and controlled demolition; grinding; shot blasting and hydrodemolition | selective/interior/controlled demolition, diamond grinding, shot blasting, hydrodemolition | renovations, warehouses, parking decks |
+| Diamond Grinding (12th; on the trucks, not a service page) | Pavement and bridge-deck grinding for smoothness, trip hazards, floor grinding and polishing | diamond grinding, concrete/floor grinding, trip hazards | concrete pavement restoration, bump/profile grinding, polished concrete, epoxy floors, coating removal, warehouse floors |
+| Related: selective demolition, surface preparation | Interior and controlled demolition; grinding; shot blasting and hydrodemolition | selective/interior/controlled demolition, diamond grinding, shot blasting, hydrodemolition | renovations, warehouses, parking decks |
 
 Past project types named on the site: bridge replacements and column rehab (St. Johns River Bridge, Skyway Bridge, Sisters Creek
 bascule bridge), expressways and toll roads (I-595, Ultimate I-4, S.R. 23), trails, dams (Jane Green Retention Dam), stadiums

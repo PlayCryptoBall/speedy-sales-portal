@@ -278,5 +278,70 @@ await t('Every one of Speedy\'s eleven published services is recognized as docum
   }
 });
 
+await t('Diamond grinding (12th service): road and floor wording counts as inferred grinding scope', () => {
+  const road = C('SR 528 concrete pavement restoration', 'Bump grinding and joint resealing of concrete pavement');
+  assert.ok(['potential', 'high'].includes(road.relevance)); assert.ok(road.services.includes('Diamond grinding'), road.services.join());
+  const floor = C('Distribution center refresh', 'Remove epoxy floor coating and polish concrete in the warehouse');
+  assert.ok(floor.services.includes('Diamond grinding'), floor.services.join());
+  assert.equal(C('Diamond grinding of the bridge deck').relevance, 'high');
+});
+
+// Synthetic records shaped exactly like the live feeds (no real owners or applicants in this public repository).
+const orlPlan = (o) => ({ application_number: 'MPL2026-10001', application_name: 'Lakeside Commons', application_description: 'Master Plan', application_status: 'Open',
+  address: '100 EXAMPLE AVE', application_date: '2026-09-01T00:00:00.000', last_action_date: '2026-11-10T00:00:00.000',
+  application_comments: 'New 12 story office building 240,000 sf with a 3 level parking garage; demolish existing 20,000 sf retail building',
+  parcel_id: '00-00-00-0000-00-001', applicant: 'Example Engineering Group (Jane Roe)', ...o });
+
+await t('Orlando planning applications: commercial work kept, fences and variances dropped, engineer and contact recorded', () => {
+  const keep = L.normalizeOrlandoPlanning(orlPlan());
+  assert.equal(L.planningWanted(keep), true);
+  assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Variances' }))), false);
+  assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Pre Application Meeting', application_name: 'Fence in front yard', application_comments: 'six foot fence for a single family home' }))), false);
+  assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Pre Application Meeting', application_name: 'Former bank site', application_comments: 'redevelop the site as a 180 unit mixed use building' }))), true);
+  const cls = L.classify(L.planningSections(keep, 'u'));
+  const p = L.planningPayload(keep, cls, { source_id: 'orlando_planning', dataset_url: 'https://data.cityoforlando.net/resource/bhxy-4rji.json' });
+  assert.equal(p.stage, 'design'); assert.equal(p.external_key, 'orlplan:MPL2026-10001'); assert.match(p.size_note, /240,000 sq ft/);
+  assert.deepEqual(p.extras.stakeholders.map(x => x.role), ['engineer', 'applicant']);
+  assert.equal(p.extras.signal_type, 'site_plan');
+  assert.equal(L.planningStage('Zoning'), 'planning');
+  if (cls.relevance === 'high' || cls.relevance === 'potential') assert.equal(p.opportunity.approach, 'approach_developer');
+  else assert.equal(p.opportunity, undefined, 'weak signals stay on Early signals, out of the pool');
+});
+
+await t('Orange County cases: code-violation variances dropped, rezonings are entitlement, development plans are design, planner kept as a contact', () => {
+  const base = { FOLDERRSN: 1, FOLDERNAME: 'Example PD / Lot 4 - Dealership DP', APPLICANT: 'Example Civil Engineers, Inc. (John Doe) (John Doe)',
+    FOLDERTYPE: 'CDR Change Determination Review', FOLDERDESCRIPTION: 'To expand and renovate the existing dealership with a 4-level parking structure',
+    ACREAGE: '5.0512', PARCELID_STR: '00-00-00-0000-00-002\r', USERNAME: 'Pat Planner', USERPHONE: '407-555-0100', EMAILADDRESS: 'pat@example.gov' };
+  const c = L.normalizeCountyCase(base);
+  assert.equal(L.countyCaseWanted(c), true);
+  assert.equal(L.countyCaseWanted(L.normalizeCountyCase({ ...base, FOLDERTYPE: 'VA Zoning Variance', FOLDERDESCRIPTION: 'Variance to allow a 6 ft fence. NOTE: This is the result of a code violation' })), false);
+  assert.equal(L.countyCaseStage('RZ Conventional Rezoning'), 'planning'); assert.equal(L.countyCaseStage('LUP Land Use Plan (PD)'), 'planning');
+  assert.equal(L.countyCaseStage('DP Development Plan Review'), 'design');
+  const p = L.countyCasePayload(c, L.classify([{ field: 'd', text: c.description }]), { source_id: 'orange_dev_cases', url: 'u' });
+  assert.equal(p.stage, 'design'); assert.equal(p.extras.parcel_id, '00-00-00-0000-00-002'); assert.equal(p.extras.acreage, 5.05);
+  const roles = p.extras.stakeholders.map(x => x.role);
+  assert.deepEqual(roles, ['engineer', 'applicant', 'agency_contact']);
+  assert.equal(p.extras.stakeholders[2].phone, '407-555-0100');
+});
+
+await t('Property sales: one record per deal, companies buying land or commercial buildings kept, houses, condos and apartments dropped', () => {
+  const sale = (o) => L.normalizeSale({ PARCEL: '000000000000001', NAME1: 'EXAMPLE LAND HOLDINGS LLC', ADD1: '1 MAIN ST', ADD2: 'ORLANDO FL 32801',
+    SALE_DATE: Date.UTC(2026, 9, 1), SALE_ADJ_VALUE: 4200000, DOR_CODE: '1000', ACREAGE: 6.2, ZONING_CODE: 'C-2', SITUS: '0 EXAMPLE RD', CITY_SITUS: 'UN-INCORPORATED', ...o });
+  const units = [1, 2, 3].map(i => sale({ PARCEL: `00000000000010${i}`, DOR_CODE: '0122', NAME1: 'EXAMPLE CONDO VENTURES LLC', SITUS: `5 PARK ST UNIT ${i}` }));
+  const groups = L.groupSales([sale(), ...units]);
+  assert.equal(groups.length, 2, 'three condo units in one deal are one sale');
+  assert.equal(L.saleWanted(groups.find(g => g[0].dor === '1000')), true);
+  assert.equal(L.saleWanted(groups.find(g => g[0].dor === '0122')), false, 'condos are residential');
+  assert.equal(L.saleWanted([sale({ DOR_CODE: '0310' })]), false, 'apartment trades are not construction');
+  assert.equal(L.saleWanted([sale({ NAME1: 'JANE DOE' })]), false, 'a person buying land is not a development signal');
+  assert.equal(L.saleWanted([sale({ SALE_ADJ_VALUE: 900000 })]), false);
+  assert.equal(L.saleWanted([sale({ DOR_CODE: '1100', ACREAGE: 1.2, GROSS_AREA: 40000, AYB: 1988 })]), true, 'commercial building bought by a company');
+  const p = L.salePayload([sale()], { source_id: 'orange_land_sales' });
+  assert.equal(p.stage, 'land'); assert.equal(p.relevance, 'review'); assert.equal(p.opportunity, undefined, 'sales never go straight to the pool');
+  assert.match(p.title, /^Example Land Holdings LLC bought 6\.2 acres of vacant land at 0 Example Rd$/);
+  assert.equal(p.city, null, 'unincorporated is not a city');
+  assert.equal(p.extras.stakeholders[0].role, 'buyer'); assert.match(p.extras.stakeholders[0].address, /1 Main St/);
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

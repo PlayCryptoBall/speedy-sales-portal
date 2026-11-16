@@ -19,7 +19,7 @@
 
   // ---------------------------------------------------------------- vocabulary
   P.REGIONS = ['Central FL', 'Tampa Bay', 'Northeast FL', 'Southwest FL', 'Southeast FL', 'Panhandle', 'Unknown'];
-  P.PSTAGE = { planning: 'Planning', design: 'In design', permitting: 'Permit filed', upcoming: 'Procurement announced', bidding: 'Open for bids', bid_closed: 'Bids closed, award pending',
+  P.PSTAGE = { land: 'Land acquired', planning: 'Entitlement (zoning)', design: 'Design and site plan', permitting: 'Permit filed', upcoming: 'Procurement announced', bidding: 'Open for bids', bid_closed: 'Bids closed, award pending',
     low_bidder: 'Apparent low bidder (not final)', intent_to_award: 'Intended award', awarded: 'Awarded', preconstruction: 'Starting soon',
     under_construction: 'Under construction', completed: 'Completed', cancelled: 'Cancelled', unknown: 'Stage unknown' };
   P.APPROACH = {
@@ -136,6 +136,7 @@
     swap: '<path d="M7 4 3 8l4 4M3 8h13M17 12l4 4-4 4M21 16H8"/>',
     dollar: '<path d="M12 3v18M16.5 7.5c-.8-1.3-2.5-2-4.5-2-2.5 0-4.5 1.3-4.5 3.2 0 4.3 9 2.4 9 6.6 0 1.9-2 3.2-4.5 3.2-2.1 0-3.9-.8-4.7-2.2"/>',
     flag: '<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>',
+    signal: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
   };
   P.prioTag = (p) => p ? `<span class="tag ${p.toLowerCase()}">${esc(p)}</span>` : '';   // print view
   P.icon = (k, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
@@ -433,7 +434,7 @@
     const mgr = P.isMgr();
     return [
       ['Daily work', [['today', 'Today', 'today']]],
-      ['Opportunities', [['pool', 'Available', 'pool'], ['mine', 'My pipeline', 'mine'], mgr && ['all', 'All leads', 'all']]],
+      ['Opportunities', [['pool', 'Available', 'pool'], ['mine', 'My pipeline', 'mine'], ['signals', 'Early signals', 'signal'], mgr && ['all', 'All leads', 'all']]],
       ['Government', [['gov', 'Gov contracts', 'gov']]],
       mgr && ['Management', [['team', 'Team', 'team'], ['users', 'People and access', 'users']]],
       mgr && ['Data and system', [['sources', 'Sources and refreshes', 'sources']]],
@@ -441,7 +442,7 @@
     ].filter(Boolean).map(([g, items]) => [g, items.filter(Boolean)]);
   };
   P.TITLES = { today: 'Today', pool: 'Available', mine: 'My pipeline', all: 'All leads', gov: 'Gov contracts', team: 'Team', users: 'People and access',
-    sources: 'Sources and refreshes', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
+    sources: 'Sources and refreshes', signals: 'Early signals', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
   P.renderShell = () => {
     const me = P.state.me, collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
     const link = ([k, label, icon]) => `<a class="sb-link" href="#/${k}" data-nav="${k}" title="${esc(label)}">${P.icon(icon)}<span class="txt">${esc(label)}</span><span class="sb-count" data-count="${k}"></span></a>`;

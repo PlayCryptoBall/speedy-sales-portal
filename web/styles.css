@@ -662,3 +662,18 @@ tr.clickable { cursor: pointer; }
 .report-filters .field { margin: 0; min-width: 140px; }
 .saved-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -4px 0 10px; }
 .probe { margin-top: 12px; }
+
+/* Early signals */
+.sig-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 12px; }
+.lcard.sig { gap: 8px; }
+.sig-t { font-size: 15px; line-height: 1.35; margin: 2px 0 0; font-weight: 600; }
+.sig-sum { color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0; }
+.pchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip { font-size: 12px; padding: 3px 8px; border-radius: var(--r-sm); background: var(--hover); border: 1px solid var(--line); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sig-tools { justify-content: space-between; }
+.people { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.people li { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: start; }
+.people .role { color: var(--muted); font-size: 12px; padding-top: 2px; }
+.people .who { min-width: 0; overflow-wrap: anywhere; }
+.people .who .sub { display: block; }
+@media (max-width: 560px) { .people li { grid-template-columns: 1fr; gap: 2px; } }
