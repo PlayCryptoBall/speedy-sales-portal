@@ -305,34 +305,42 @@ async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
   let n = 0;
   for (const a of keep) {
     if (run.timeUp()) { run.note('time budget reached; the rest wait for the next run'); break; }
-    if (n++ >= maxNew) { run.note(`cap of ${maxNew} reached; the rest wait for the next run`); break; }
+    if (n >= maxNew) { run.note(`${maxNew} new records saved; the rest wait for the next run`); break; }
     const url = `${base}?application_number=${encodeURIComponent(a.number)}`;
     const cls = classify(planningSections(a, url), run.terms);
     if (cls.excluded) { run.counts.low++; continue; }
     if (cls.relevance === 'high' || cls.relevance === 'potential') run.counts.relevant++;
-    await run.upsert(planningPayload(a, cls, { source_id: sourceId, dataset_url: base }));
+    const r = await run.upsert(planningPayload(a, cls, { source_id: sourceId, dataset_url: base }));
+    if (r?.action === 'discovered') n++;
   }
 }
 
 async function runCountyCases(run: Run, cfg: any, sourceId: string) {
   const base = cfg.service ?? 'https://ocgis4.ocfl.net/arcgis/rest/services/Public_Notification/MapServer';
-  // Date fields break this county service's queries, so the fields are named one by one.
-  const fields = 'FOLDERRSN,FOLDERTYPE,FOLDERNAME,APPLICANT,FOLDERDESCRIPTION,ACREAGE,PARCELID_STR,PROPOSED_ZONING,COMMUNITY_MEETING,BCC_MEETING,USERNAME,USERPHONE,EMAILADDRESS,REFERENCEFILE';
+  // This county service fails on some field combinations (and on paging and date fields), so fields are fetched in
+  // small groups, one field at a time when a group fails, and joined on the case number.
+  const groups = [['FOLDERTYPE', 'FOLDERNAME', 'APPLICANT'], ['FOLDERDESCRIPTION', 'ACREAGE', 'PARCELID_STR'], ['PROPOSED_ZONING', 'COMMUNITY_MEETING', 'BCC_MEETING'],
+    ['USERNAME', 'USERPHONE', 'EMAILADDRESS', 'REFERENCEFILE']];
   const page = cfg.public_url ?? 'https://fasttrack.ocfl.net/OnlineServices/DevelopmentCases.aspx';
+  const q = async (layer: number, fields: string[]) => {
+    const j = await run.get(`${base}/${layer}/query?where=1%3D1&outFields=FOLDERRSN,${fields.join(',')}&returnGeometry=false&f=json`, 'application/json');
+    if (j?.error) throw new Error(j.error.message || 'query failed');
+    return (j.features || []).map((f: any) => f.attributes) as any[];
+  };
+  let failedFields = 0;
   for (const layer of (cfg.layers ?? [0, 2]) as number[]) {
-    let rows: any[] = [];
-    try {
-      const j = await run.get(`${base}/${layer}/query?where=1%3D1&outFields=${fields}&returnGeometry=false&f=json`, 'application/json');
-      if (j?.error) throw new Error(j.error.message || 'query failed');
-      rows = (j.features || []).map((f: any) => f.attributes);
-    } catch (e) {
-      // the planner contact fields are sometimes missing; retry with the case fields only
-      run.note(`layer ${layer}: ${(e as Error).message}; retrying without staff contact fields`);
-      const j = await run.get(`${base}/${layer}/query?where=1%3D1&outFields=${fields.replace(',USERNAME,USERPHONE,EMAILADDRESS,REFERENCEFILE', '')}&returnGeometry=false&f=json`, 'application/json');
-      if (j?.error) throw new Error(`layer ${layer}: ${j.error.message || 'query failed'}`);
-      rows = (j.features || []).map((f: any) => f.attributes);
+    const byId = new Map<string, any>();
+    const merge = (rows: any[]) => rows.forEach(r => { const k = String(r.FOLDERRSN); byId.set(k, { ...(byId.get(k) || {}), ...r }); });
+    for (const g of groups) {
+      try { merge(await q(layer, g)); }
+      catch {
+        for (const f of g) {
+          try { merge(await q(layer, [f])); }
+          catch (e) { failedFields++; run.note(`layer ${layer}: field ${f} could not be read (${(e as Error).message})`); }
+        }
+      }
     }
-    const cases = rows.map(normalizeCountyCase);
+    const cases = [...byId.values()].map(normalizeCountyCase).filter(c => c.type || c.name);
     run.counts.examined += cases.length;
     const keep = cases.filter(countyCaseWanted);
     run.note(`layer ${layer}: ${cases.length} cases on public notice, ${keep.length} kept`);
@@ -343,6 +351,8 @@ async function runCountyCases(run: Run, cfg: any, sourceId: string) {
       await run.upsert(countyCasePayload(c, cls, { source_id: sourceId, url: page }));
     }
   }
+  // the case name, type and description are essential; a missing contact field only makes the run partial
+  if (failedFields) { run.counts.errors++; run.counts.fetched = Math.max(run.counts.fetched, 1); }
 }
 
 async function runLandSales(run: Run, cfg: any, sourceId: string) {
@@ -367,9 +377,10 @@ async function runLandSales(run: Run, cfg: any, sourceId: string) {
   const maxNew = cfg.max_new_per_run ?? 60;
   let n = 0;
   for (const g of groups.sort((a, b) => b[0].price - a[0].price)) {
-    if (run.timeUp() || n++ >= maxNew) { run.note('cap reached; the rest wait for the next run'); break; }
+    if (run.timeUp() || n >= maxNew) { run.note(`${n} new sales saved; the rest wait for the next run`); break; }
     run.counts.relevant++;
-    await run.upsert(salePayload(g, { source_id: sourceId }));
+    const r = await run.upsert(salePayload(g, { source_id: sourceId }));
+    if (r?.action === 'discovered') n++;
   }
 }
 
