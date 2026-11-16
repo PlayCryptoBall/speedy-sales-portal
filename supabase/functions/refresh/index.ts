@@ -300,6 +300,7 @@ async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
   const apps = rows.map(normalizeOrlandoPlanning);
   run.counts.examined += apps.length;
   const keep = apps.filter(planningWanted);
+  await retire(run, apps.filter(a => a.number && !planningWanted(a)).map(a => `orlplan:${a.number}`));
   run.note(`${rows.length} planning applications with activity since ${since}; ${keep.length} describe commercial, institutional or multi-family building work`);
   const maxNew = cfg.max_new_per_run ?? 60;
   let n = 0;
@@ -343,6 +344,7 @@ async function runCountyCases(run: Run, cfg: any, sourceId: string) {
     const cases = [...byId.values()].map(normalizeCountyCase).filter(c => c.type || c.name);
     run.counts.examined += cases.length;
     const keep = cases.filter(countyCaseWanted);
+    await retire(run, cases.filter(c => c.id && !countyCaseWanted(c)).map(c => `occase:${c.id}`));
     run.note(`layer ${layer}: ${cases.length} cases on public notice, ${keep.length} kept`);
     for (const c of keep) {
       const cls = classify([{ field: 'case description', text: `${c.name}. ${c.description}`, doc: `Orange County case ${c.reference || c.id}`, url: page }], run.terms);
@@ -371,7 +373,9 @@ async function runLandSales(run: Run, cfg: any, sourceId: string) {
   }
   const sales = rows.map(normalizeSale).filter(s => s.parcel && s.date);
   run.counts.examined += sales.length;
-  const groups = groupSales(sales).filter(g => saleWanted(g, cfg));
+  const all = groupSales(sales);
+  const groups = all.filter(g => saleWanted(g, cfg));
+  await retire(run, all.filter(g => !saleWanted(g, cfg)).flatMap(g => g.map(x => `ocsale:${x.parcel}:${x.date}`)));
   const latest = sales.reduce((m, s) => s.date > m ? s.date : m, '');
   run.note(`${sales.length} sales of $${minPrice.toLocaleString()}+ since ${since} (latest posted sale ${latest || 'none'}); ${groups.length} are land or commercial buildings bought by companies`);
   const maxNew = cfg.max_new_per_run ?? 60;
@@ -382,6 +386,15 @@ async function runLandSales(run: Run, cfg: any, sourceId: string) {
     const r = await run.upsert(salePayload(g, { source_id: sourceId }));
     if (r?.action === 'discovered') n++;
   }
+}
+
+// Records a source sent earlier that the current filters reject (homeowner work, small jobs) leave Early signals;
+// a lead made from one is archived only if nobody has worked it.
+async function retire(run: Run, keys: string[]) {
+  if (!keys.length) return;
+  const { data, error } = await db.rpc('refresh_retire_signals', { p_keys: keys });
+  if (error) { run.note(`could not retire filtered records: ${error.message}`); return; }
+  if (data?.retired) run.note(`${data.retired} earlier record(s) no longer pass the filters and left Early signals (${data.archived_leads} untouched lead(s) archived)`);
 }
 
 async function loadTerms(run: Run) {

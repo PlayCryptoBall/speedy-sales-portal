@@ -298,6 +298,13 @@ await t('Orlando planning applications: commercial work kept, fences and varianc
   assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Variances' }))), false);
   assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Pre Application Meeting', application_name: 'Fence in front yard', application_comments: 'six foot fence for a single family home' }))), false);
   assert.equal(L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Pre Application Meeting', application_name: 'Former bank site', application_comments: 'redevelop the site as a 180 unit mixed use building' }))), true);
+  // homeowner work in a historic district or a door swap downtown is not a lead, even when it says demolition or addition
+  const homeowner = (o) => L.planningWanted(L.normalizeOrlandoPlanning(orlPlan({ application_description: 'Historic Preservation Board', ...o })));
+  assert.equal(homeowner({ application_name: '27 Example Ave - Alterations', application_comments: 'Selective demolition and repair of house due to termite damage' }), false);
+  assert.equal(homeowner({ application_name: '200 Example Ct', application_comments: '286 sq ft efficiency with kitchenette within attic of existing garage' }), false);
+  assert.equal(homeowner({ application_description: 'Appearance Review Board', application_name: '27 E Example St - Minor review', application_comments: 'Remove and replace door, replacing window glass only' }), false);
+  assert.equal(homeowner({ application_description: 'Appearance Review Board', application_name: '640 W Example St', application_comments: 'Demolition of an existing office building damaged beyond repair' }), true);
+  assert.equal(homeowner({ application_name: '1400 Example St (Addition)', application_comments: 'Porch extension approx 230 sf' }), false);
   const cls = L.classify(L.planningSections(keep, 'u'));
   const p = L.planningPayload(keep, cls, { source_id: 'orlando_planning', dataset_url: 'https://data.cityoforlando.net/resource/bhxy-4rji.json' });
   assert.equal(p.stage, 'design'); assert.equal(p.external_key, 'orlplan:MPL2026-10001'); assert.match(p.size_note, /240,000 sq ft/);
@@ -336,6 +343,9 @@ await t('Property sales: one record per deal, companies buying land or commercia
   assert.equal(L.saleWanted([sale({ NAME1: 'JANE DOE' })]), false, 'a person buying land is not a development signal');
   assert.equal(L.saleWanted([sale({ SALE_ADJ_VALUE: 900000 })]), false);
   assert.equal(L.saleWanted([sale({ DOR_CODE: '1100', ACREAGE: 1.2, GROSS_AREA: 40000, AYB: 1988 })]), true, 'commercial building bought by a company');
+  assert.equal(L.saleWanted([sale({ DOR_CODE: '1100', ACREAGE: 0.4, GROSS_AREA: 3500, SALE_ADJ_VALUE: 1600000 })]), false, 'a small shop is not a redevelopment signal');
+  assert.equal(L.saleWanted([sale({ NAME1: 'JOHN EXAMPLE TRUST', DOR_CODE: '0000', ACREAGE: 5.1 })]), false, 'a family trust buying acreage is not a developer');
+  assert.equal(L.saleWanted([sale({ DOR_CODE: '0000', ACREAGE: 6 })]), false, 'vacant residential acreage needs 10+ acres');
   const p = L.salePayload([sale()], { source_id: 'orange_land_sales' });
   assert.equal(p.stage, 'land'); assert.equal(p.relevance, 'review'); assert.equal(p.opportunity, undefined, 'sales never go straight to the pool');
   assert.match(p.title, /^Example Land Holdings LLC bought 6\.2 acres of vacant land at 0 Example Rd$/);

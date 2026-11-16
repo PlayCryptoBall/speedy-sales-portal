@@ -575,16 +575,18 @@ export function normalizeOrlandoPlanning(r: any): PlanningApp {
     lastAction: r.last_action_date ? String(r.last_action_date).slice(0, 10) : null, approved: r.approval_date ? String(r.approval_date).slice(0, 10) : null,
     comments: clean(r.application_comments), parcel: clean(r.parcel_id) || null, applicant: clean(r.applicant) };
 }
-const PLAN_ALWAYS = /^(master plan|conditional use permit|zoning|growth management plan|appearance review board)$/i;
-const PLAN_IF_SUBSTANTIVE = /^(pre application meeting|determination|historic preservation board|modification of standards|subdivision)$/i;
-// Commercial, institutional, industrial or multi-family building work, as opposed to a fence, sign, porch or a single house.
-const SUBSTANTIVE = /\b(\d{2,}[,\d]* ?(?:sf|sq\.? ?ft|square feet)|\d{2,} (?:units?|du|rooms?|keys|beds?)|commercial|office|retail|restaurant|hotel|warehouse|industrial|manufactur\w*|hospital|medical|clinic|school|church|apartments?|multi-?family|mixed[- ]use|parking (?:garage|structure|deck)|redevelop\w*|demoli\w*|renovat\w*|addition|new building|tower|stor(?:y|ies)|data center|lab(?:oratory)?|dealership|showroom|terminal|hangar)\b/i;
-const PLAN_SKIP = /\b(sign(?:age)?|fence|wall sign|porch|deck|pool|shed|carport|single[- ]family (?:home|residence)|accessory dwelling|adu|garage apartment|window replacement|paint\w*|roof replacement|tree removal|lot split)\b/i;
+const PLAN_ALWAYS = /^(master plan|conditional use permit|zoning|growth management plan)$/i;
+const PLAN_IF_BUILDING = /^(pre application meeting|determination|historic preservation board|modification of standards|subdivision|appearance review board)$/i;
+// A commercial, institutional, industrial or larger multi-family building, the kind of job Speedy is called to.
+const BUILDING = /\b(\d{2,3},\d{3} ?(?:sf|sq\.? ?ft|square feet)|\d{5,} ?(?:sf|sq\.? ?ft|square feet)|(?:[2-9]\d|\d{3,}) (?:units?|du|dwelling units|rooms?|keys|beds?)|commercial|office|retail|restaurant|hotel|warehouse|industrial|manufactur\w*|hospital|medical|clinic|school|church|apartments|multi-?family|mixed[- ]use|parking (?:garage|structure|deck)|redevelop\w*|tower|stor(?:y|ies) (?:building|tower|mixed|office)|data center|laborator\w*|dealership|showroom|terminal|hangar|grocery|distribution|assisted living|senior living|townhomes?)\b/i;
+// Homeowner work: a house, garage, porch or attic is not a Speedy sales lead even when it mentions demolition or an addition.
+const HOMEOWNER = /\b(house|home|homeowner|garage apartment|detached garage|accessory (?:dwelling|structure)|adu|attic|bathroom|kitchen|porch|carport|single[- ]family|duplex|my (?:house|home|existing)|fence|sign(?:age)?|pool|shed|window (?:glass|replacement)|replace (?:a |the )?door|repaint\w*|paint\w*)\b/i;
+const NON_RES = /\b(commercial|office|retail|restaurant|hotel|warehouse|industrial|manufactur\w*|hospital|medical|clinic|school|church|apartments|multi-?family|mixed[- ]use|parking (?:garage|structure|deck)|data center|laborator\w*|dealership|showroom|terminal|hangar|grocery|distribution)\b/i;
 export function planningWanted(a: PlanningApp): boolean {
   const text = `${a.name} ${a.comments}`;
   if (!a.number || /^(variances?|street name change|abandonment)$/i.test(a.type)) return false;
-  if (PLAN_ALWAYS.test(a.type)) return !PLAN_SKIP.test(a.name) || SUBSTANTIVE.test(text);
-  if (PLAN_IF_SUBSTANTIVE.test(a.type)) return SUBSTANTIVE.test(text) && !(/^historic/i.test(a.type) && PLAN_SKIP.test(a.name) && !/renovat|addition|demoli|restor/i.test(text));
+  if (PLAN_ALWAYS.test(a.type)) return BUILDING.test(text) || !HOMEOWNER.test(text);
+  if (PLAN_IF_BUILDING.test(a.type)) return BUILDING.test(text) && (!HOMEOWNER.test(text) || NON_RES.test(text));
   return false;
 }
 export const planningStage = (type: string) => /^(zoning|growth management plan)$/i.test(type) ? 'planning' : 'design';
@@ -598,8 +600,9 @@ export function planningPayload(a: PlanningApp, cls: Classification, cfg: { sour
   const { firm, person } = splitApplicant(a.applicant);
   const role = applicantRole(firm);
   const who = firm ? titleCase(firm) : null;
-  const name = a.name && !/^(pre application meeting|determination)$/i.test(a.name) ? a.name : `${a.type} at ${titleCase(a.address)}`;
-  const title = `${name} (${a.type}, ${titleCase(a.address)})`.slice(0, 160);
+  const place = a.address ? titleCase(a.address) : '';
+  const name = a.name && !/^(pre application meeting|determination)$/i.test(a.name) ? a.name : `${a.type}${place ? ` at ${place}` : ''}`;
+  const title = `${name} (${a.type}${place ? `, ${place}` : ''})`.slice(0, 160);
   const units = (a.comments.match(/(\d[\d,]*) (?:units?|du)\b/i) || [])[1];
   const sf = (a.comments.match(/(\d[\d,]*) ?(?:sf|sq\.? ?ft|square feet)\b/i) || [])[1];
   const stakeholders: Stakeholder[] = firm ? [{ role, name: who!, address: null, source: 'planning application', url }] : [];
@@ -607,7 +610,7 @@ export function planningPayload(a: PlanningApp, cls: Classification, cfg: { sour
   const p: Record<string, unknown> = {
     external_key: `orlplan:${a.number}`, source_id: cfg.source_id, source_url: url, source_name: 'City of Orlando planning applications',
     title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title, owner_name: role === 'developer' ? who : null, level: 'Private',
-    city: 'Orlando', county: 'Orange', region: regionForCounty('Orange'), location_text: `${titleCase(a.address)}, Orlando`, stage,
+    city: 'Orlando', county: 'Orange', region: regionForCounty('Orange'), location_text: place ? `${place}, Orlando` : 'Orlando', stage,
     status_text: `${a.type} ${a.number}: ${a.status || 'filed'}${a.applied ? `, filed ${a.applied}` : ''}${a.approved ? `, approved ${a.approved}` : ''}${a.lastAction ? `, last action ${a.lastAction}` : ''}`,
     published_at: a.applied || a.lastAction, size_note: [units && `${units} units`, sf && `${sf} sq ft`].filter(Boolean).join(', ') || null,
     source_summary: `${a.type}: ${a.comments || a.name}`.slice(0, 600),
@@ -615,7 +618,8 @@ export function planningPayload(a: PlanningApp, cls: Classification, cfg: { sour
     review_reason: cls.reason,
     extras: { stakeholders, parcel_id: a.parcel, signal_type: /^(zoning|growth management plan)$/i.test(a.type) ? 'rezoning' : 'site_plan' },
   };
-  if (cls.relevance === 'high' || cls.relevance === 'potential') {
+  // only non-residential work goes to the shared pool; everything else waits on Early signals until someone tracks it
+  if ((cls.relevance === 'high' || cls.relevance === 'potential') && NON_RES.test(`${a.name} ${a.comments}`)) {
     p.opportunity = { kind: 'private_project', approach: 'approach_developer', title: `${who ? who + ' — ' : ''}${name}`.slice(0, 200),
       company_name: role === 'developer' ? who : null, next_action: earlyStageAction(stage, who), services: cls.services };
   }
@@ -633,7 +637,8 @@ export function normalizeCountyCase(a: any): CountyCase {
 }
 export function countyCaseWanted(c: CountyCase): boolean {
   if (!c.id) return false;
-  if (/^(VA|SE)\b/.test(c.type)) return SUBSTANTIVE.test(c.description) && !/result of (?:a )?code/i.test(c.description) && !PLAN_SKIP.test(c.description.slice(0, 120));
+  if (/result of (?:a )?code/i.test(c.description)) return false;
+  if (/^(VA|SE)\b/.test(c.type)) return BUILDING.test(c.description) && (!HOMEOWNER.test(c.description) || NON_RES.test(c.description));
   return true;
 }
 export const countyCaseStage = (type: string) => /^(RZ|LUP|FLUMA|SS|CP|PD)\b|rezon|land use|amendment/i.test(type) && !/^(DP|CDR|PSP)\b/.test(type) ? 'planning' : 'design';
@@ -660,7 +665,7 @@ export function countyCasePayload(c: CountyCase, cls: Classification, cfg: { sou
     extras: { stakeholders, parcel_id: (c.parcels || '').split(',')[0].trim() || null, signal_type: stage === 'planning' ? 'rezoning' : 'site_plan',
       acreage: acres ? Number(acres.replace(/[^\d.]/g, '')) || null : null },
   };
-  if (cls.relevance === 'high' || cls.relevance === 'potential') {
+  if ((cls.relevance === 'high' || cls.relevance === 'potential') && NON_RES.test(`${c.name} ${c.description}`)) {
     p.opportunity = { kind: 'private_project', approach: 'approach_developer', title: `${who ? who + ' — ' : ''}${c.name}`.slice(0, 200),
       company_name: role === 'developer' ? who : null, next_action: earlyStageAction(stage, who), services: cls.services };
   }
@@ -701,11 +706,14 @@ export function saleWanted(group: LandSale[], cfg: { min_price?: number; min_vac
   const s = group[0];
   const kinds = new Set(group.map(x => saleKind(x.dor)));
   const acres = group.reduce((t, x) => t + x.acres, 0);
-  if (!ENTITY.test(s.buyer) || /\b(county|city of|school board|state of florida|united states)\b/i.test(s.buyer)) return false;
+  const company = /\b(llc|l\.l\.c|inc|corp\w*|company|lp|l\.p|ltd|llp|partners\w*|holdings?|properties|development|ventures?|group|investments?|fund|reit)\b/i;
+  if (!company.test(s.buyer) || /\b(county|city of|school board|state of florida|united states)\b/i.test(s.buyer)) return false;
   if (kinds.has('residential') && !kinds.has('commercial') && !kinds.has('industrial') && !kinds.has('vacant')) return false;
   if (s.price < (cfg.min_price ?? 1_500_000)) return false;
-  if (kinds.has('vacant')) return group.some(x => [10, 40, 70].includes(parseInt(x.dor.slice(0, 2), 10))) || acres >= (cfg.min_vacant_acres ?? 5);
-  return kinds.has('commercial') || kinds.has('industrial') || kinds.has('institutional');
+  if (kinds.has('vacant')) return group.some(x => [10, 40, 70].includes(parseInt(x.dor.slice(0, 2), 10))) || acres >= (cfg.min_vacant_acres ?? 10);
+  // an existing building: big enough to be renovated or torn down for something larger
+  const area = group.reduce((t, x) => t + (x.area || 0), 0);
+  return (kinds.has('commercial') || kinds.has('industrial') || kinds.has('institutional')) && (area >= (cfg.min_building_sqft ?? 10_000) || s.price >= (cfg.min_building_price ?? 3_000_000));
 }
 export function salePayload(group: LandSale[], cfg: { source_id: string }) {
   const s = [...group].sort((a, b) => b.acres - a.acres)[0];

@@ -711,6 +711,22 @@ await test('Early signals: a property sale and a later rezoning on the same parc
   assert.equal(people.related.length, 1); assert.equal(people.related[0].opp, t1.id);
   assert.equal(people.stakeholders.length, 2, 'buyer named twice with different punctuation is kept once per record');
   assert.equal((await b.rpc('early_signals', { p: { days: 3650, tracked: 'untracked', q: 'Test' } })).items.length, 1);
+  // a source record the filters now reject leaves the list; a lead made from it is archived only if nobody worked it
+  const run2 = await svc.rpc('refresh_start_run', { p_source: 'orlando_planning', p_trigger: 'test' });
+  for (const [k, t] of [['orlplan:TEST-HOME', 'Test house porch'], ['orlplan:TEST-WORKED', 'Test worked office']]) {
+    await svc.rpc('refresh_upsert_project', { p_run: run2, p: { external_key: k, source_id: 'orlando_planning', title: t, level: 'Private', city: 'Orlando', county: 'Orange',
+      region: 'Central FL', stage: 'design', relevance: 'potential', source_summary: t, opportunity: { kind: 'private_project', approach: 'approach_developer', title: t } } });
+    await svc.rpc('refresh_project_extras', { p_key: k, p: { signal_type: 'site_plan' } });
+  }
+  const worked = await opp(`external_key = 'orlplan:TEST-WORKED'`);
+  await a.rpc('claim_opportunity', { p_id: worked.id });
+  await a.rpc('log_activity', { p_id: worked.id, p: { kind: 'note', body: 'called' } });
+  const ret = await svc.rpc('refresh_retire_signals', { p_keys: ['orlplan:TEST-HOME', 'orlplan:TEST-WORKED', 'orlplan:NOT-THERE'] });
+  assert.deepEqual(ret, { retired: 2, archived_leads: 1 });
+  assert.equal((await opp(`external_key = 'orlplan:TEST-HOME'`)).stage, 'archived');
+  assert.notEqual((await opp(`external_key = 'orlplan:TEST-WORKED'`)).stage, 'archived', 'work someone started is never archived automatically');
+  assert.equal((await b.rpc('early_signals', { p: { days: 3650, q: 'Test house' } })).items.length, 0);
+  await b.fails('refresh_retire_signals', { p_keys: ['x'] }, /permission denied/);
 });
 
 await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {
