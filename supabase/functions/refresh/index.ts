@@ -304,6 +304,7 @@ async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
   run.note(`${rows.length} planning applications with activity since ${since}; ${keep.length} describe commercial, institutional or multi-family building work`);
   const maxNew = cfg.max_new_per_run ?? 60;
   let n = 0;
+  const notPool: string[] = [];
   for (const a of keep) {
     if (run.timeUp()) { run.note('time budget reached; the rest wait for the next run'); break; }
     if (n >= maxNew) { run.note(`${maxNew} new records saved; the rest wait for the next run`); break; }
@@ -311,9 +312,12 @@ async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
     const cls = classify(planningSections(a, url), run.terms);
     if (cls.excluded) { run.counts.low++; continue; }
     if (cls.relevance === 'high' || cls.relevance === 'potential') run.counts.relevant++;
-    const r = await run.upsert(planningPayload(a, cls, { source_id: sourceId, dataset_url: base }));
+    const pay = planningPayload(a, cls, { source_id: sourceId, dataset_url: base });
+    if (!pay.opportunity) notPool.push(pay.external_key as string);
+    const r = await run.upsert(pay);
     if (r?.action === 'discovered') n++;
   }
+  await retire(run, notPool, true);
 }
 
 async function runCountyCases(run: Run, cfg: any, sourceId: string) {
@@ -329,6 +333,7 @@ async function runCountyCases(run: Run, cfg: any, sourceId: string) {
     return (j.features || []).map((f: any) => f.attributes) as any[];
   };
   let failedFields = 0;
+  const notPool: string[] = [];
   for (const layer of (cfg.layers ?? [0, 2]) as number[]) {
     const byId = new Map<string, any>();
     const merge = (rows: any[]) => rows.forEach(r => { const k = String(r.FOLDERRSN); byId.set(k, { ...(byId.get(k) || {}), ...r }); });
@@ -350,9 +355,12 @@ async function runCountyCases(run: Run, cfg: any, sourceId: string) {
       const cls = classify([{ field: 'case description', text: `${c.name}. ${c.description}`, doc: `Orange County case ${c.reference || c.id}`, url: page }], run.terms);
       if (cls.excluded) { run.counts.low++; continue; }
       if (cls.relevance === 'high' || cls.relevance === 'potential') run.counts.relevant++;
-      await run.upsert(countyCasePayload(c, cls, { source_id: sourceId, url: page }));
+      const pay = countyCasePayload(c, cls, { source_id: sourceId, url: page });
+      if (!pay.opportunity) notPool.push(pay.external_key as string);
+      await run.upsert(pay);
     }
   }
+  await retire(run, notPool, true);
   // the case name, type and description are essential; a missing contact field only makes the run partial
   if (failedFields) { run.counts.errors++; run.counts.fetched = Math.max(run.counts.fetched, 1); }
 }
@@ -390,11 +398,12 @@ async function runLandSales(run: Run, cfg: any, sourceId: string) {
 
 // Records a source sent earlier that the current filters reject (homeowner work, small jobs) leave Early signals;
 // a lead made from one is archived only if nobody has worked it.
-async function retire(run: Run, keys: string[]) {
+async function retire(run: Run, keys: string[], keepSignal = false) {
   if (!keys.length) return;
-  const { data, error } = await db.rpc('refresh_retire_signals', { p_keys: keys });
+  const { data, error } = await db.rpc('refresh_retire_signals', { p_keys: keys, p_keep_signal: keepSignal });
   if (error) { run.note(`could not retire filtered records: ${error.message}`); return; }
-  if (data?.retired) run.note(`${data.retired} earlier record(s) no longer pass the filters and left Early signals (${data.archived_leads} untouched lead(s) archived)`);
+  if (!keepSignal && data?.retired) run.note(`${data.retired} earlier record(s) no longer pass the filters and left Early signals (${data.archived_leads} untouched lead(s) archived)`);
+  if (keepSignal && data?.archived_leads) run.note(`${data.archived_leads} untouched lead(s) taken out of Available: the record stays on Early signals but is not pool-worthy`);
 }
 
 async function loadTerms(run: Run) {

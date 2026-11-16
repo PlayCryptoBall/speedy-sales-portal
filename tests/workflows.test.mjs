@@ -380,7 +380,7 @@ await test('Workbook import: preview first, never overwrites newer portal work, 
 
 // ---------------------------------------------------------------- manager tools
 await test('Manager assigns, reassigns and releases with history; deactivated rep is locked out at once', async () => {
-  const o = await opp(`stage='available' and not needs_review`);
+  const o = await opp(`stage='available' and not needs_review and not exists (select 1 from ownership_history h where h.opportunity_id = z.id)`);
   await m.rpc('assign_opportunity', { p_id: o.id, p_user: A, p_reason: 'Knows the GC' });
   await m.rpc('assign_opportunity', { p_id: o.id, p_user: B, p_reason: 'Flip on vacation' });
   await m.rpc('release_opportunity', { p_id: o.id, p_reason: 'Back to pool' });
@@ -726,7 +726,14 @@ await test('Early signals: a property sale and a later rezoning on the same parc
   assert.equal((await opp(`external_key = 'orlplan:TEST-HOME'`)).stage, 'archived');
   assert.notEqual((await opp(`external_key = 'orlplan:TEST-WORKED'`)).stage, 'archived', 'work someone started is never archived automatically');
   assert.equal((await b.rpc('early_signals', { p: { days: 3650, q: 'Test house' } })).items.length, 0);
-  await b.fails('refresh_retire_signals', { p_keys: ['x'] }, /permission denied/);
+  // keep the signal but take an unworked lead out of Available
+  await svc.rpc('refresh_upsert_project', { p_run: run2, p: { external_key: 'orlplan:TEST-KEEP', source_id: 'orlando_planning', title: 'Test keep office signage', level: 'Private',
+    city: 'Orlando', county: 'Orange', region: 'Central FL', stage: 'design', relevance: 'potential', source_summary: 'x', opportunity: { kind: 'private_project', approach: 'approach_developer', title: 'Test keep' } } });
+  await svc.rpc('refresh_project_extras', { p_key: 'orlplan:TEST-KEEP', p: { signal_type: 'site_plan' } });
+  assert.deepEqual(await svc.rpc('refresh_retire_signals', { p_keys: ['orlplan:TEST-KEEP'], p_keep_signal: true }), { retired: 0, archived_leads: 1 });
+  const kept = (await b.rpc('early_signals', { p: { days: 3650, q: 'Test keep' } })).items;
+  assert.equal(kept.length, 1); assert.equal(kept[0].opportunity, null, 'listed again as untracked, so anyone can still track it');
+  await b.fails('refresh_retire_signals', { p_keys: ['x'], p_keep_signal: false }, /permission denied/);
 });
 
 await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {

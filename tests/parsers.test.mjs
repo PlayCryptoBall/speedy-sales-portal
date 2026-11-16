@@ -305,6 +305,13 @@ await t('Orlando planning applications: commercial work kept, fences and varianc
   assert.equal(homeowner({ application_description: 'Appearance Review Board', application_name: '27 E Example St - Minor review', application_comments: 'Remove and replace door, replacing window glass only' }), false);
   assert.equal(homeowner({ application_description: 'Appearance Review Board', application_name: '640 W Example St', application_comments: 'Demolition of an existing office building damaged beyond repair' }), true);
   assert.equal(homeowner({ application_name: '1400 Example St (Addition)', application_comments: 'Porch extension approx 230 sf' }), false);
+  assert.equal(homeowner({ application_name: '346 Example (Addition)', application_comments: 'I want to build 2 apartments in my existing detached garage' }), false);
+  assert.equal(homeowner({ application_description: 'Pre Application Meeting', application_name: 'Signage for Example Office Bldg', application_comments: 'new wall signs for the office building' }), false);
+  assert.equal(homeowner({ application_description: 'Determination', application_name: '55 W Example St - mural 2', application_comments: 'mural on the retail building' }), false);
+  assert.equal(homeowner({ application_description: 'Pre Application Meeting', application_name: 'Former bank site', application_comments: 'redevelop the site as a 180 unit mixed use building' }), true);
+  assert.equal(L.poolWorthy('Demolition of an existing office building damaged beyond repair'), true);
+  assert.equal(L.poolWorthy('build 2 apartments in my existing detached garage'), false);
+  assert.equal(L.poolWorthy('Signage for Example Office Bldg'), false);
   const cls = L.classify(L.planningSections(keep, 'u'));
   const p = L.planningPayload(keep, cls, { source_id: 'orlando_planning', dataset_url: 'https://data.cityoforlando.net/resource/bhxy-4rji.json' });
   assert.equal(p.stage, 'design'); assert.equal(p.external_key, 'orlplan:MPL2026-10001'); assert.match(p.size_note, /240,000 sq ft/);
@@ -322,6 +329,8 @@ await t('Orange County cases: code-violation variances dropped, rezonings are en
   const c = L.normalizeCountyCase(base);
   assert.equal(L.countyCaseWanted(c), true);
   assert.equal(L.countyCaseWanted(L.normalizeCountyCase({ ...base, FOLDERTYPE: 'VA Zoning Variance', FOLDERDESCRIPTION: 'Variance to allow a 6 ft fence. NOTE: This is the result of a code violation' })), false);
+  assert.equal(L.countyCaseWanted(L.normalizeCountyCase({ ...base, FOLDERNAME: '7000 Example Road', FOLDERTYPE: 'RZ Conventional Rezoning', FOLDERDESCRIPTION: 'To rezone from R-1A to R-1 to develop a single-family subdivision of 30 lots' })), false, 'house subdivisions are not Speedy work');
+  assert.equal(L.countyCaseWanted(L.normalizeCountyCase({ ...base, FOLDERTYPE: 'RZ Conventional Rezoning', FOLDERDESCRIPTION: 'To rezone from A-2 to R-3 to allow 53 multi-family units' })), true);
   assert.equal(L.countyCaseStage('RZ Conventional Rezoning'), 'planning'); assert.equal(L.countyCaseStage('LUP Land Use Plan (PD)'), 'planning');
   assert.equal(L.countyCaseStage('DP Development Plan Review'), 'design');
   const p = L.countyCasePayload(c, L.classify([{ field: 'd', text: c.description }]), { source_id: 'orange_dev_cases', url: 'u' });
