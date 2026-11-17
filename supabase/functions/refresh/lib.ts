@@ -541,7 +541,7 @@ export function permitPayload(x: Permit, cls: Classification, cfg: { city: strin
 // ---------------------------------------------------------------- FDOT bid tabulations (pay items and quantities)
 // Districts and Central Office post a bid tabulation PDF for each contract a week or two after the letting. Its pay items
 // state the work in FDOT's own words with quantities, so a removal or sawing item is documented scope, not inferred.
-export interface BidItem { line: string; item: string; desc: string; qty: number | null; unit: string | null }
+export interface BidItem { line: string; item: string; desc: string; qty: number | null; unit: string | null; lumpSum?: boolean }
 export const bidTabContract = (url: string) => {
   const m = decodeURIComponent(url).match(/\/([A-Za-z]\d[A-Za-z0-9]{3})(?:-r\d+)?-?bid-?tabs?\.pdf/i);
   return m ? m[1].toUpperCase() : null;
@@ -555,23 +555,23 @@ export function bidTabLinks(html: string): Map<string, string> {
   }
   return out;
 }
-const UNITS = 'SY|LF|CY|EA|LS|SF|TN|GM|CF|DA|AC|MB|LB|GA|HR|MO|NM|CM|ED|PI|LO|WK|PH|ME|YR|PM|KF|MG|CD';
+const UNITS = 'SY|LF|CY|EA|LS|SF|TN|GM|CF|DA|AC|MB|LB|GA|HR|MO|NM|CM|ED|FD|PI|LO|WK|PH|ME|YR|PM|KF|MG|CD';
 export function parseBidTabItems(text: string): BidItem[] {
   const t = text.replace(/&amp;/g, '&').replace(/\s+/g, ' ');
-  const start = /(?:^|[\s|])(\d{4})\s*\|?\s*(0\d{3}(?:\d{1,6})?(?![.,\d])(?:\s\d{1,7}(?![.,\d])){0,3})\s/g;
+  const start = /(?:^|[\s|])(\d{4})(?:\s+\|?\s*|\|\s*)(0\d{3}(?:\d{1,6})?(?![.,\d])(?:\s\d{1,7}(?![.,\d])){0,3})\s/g;
   const hits = [...t.matchAll(start)];
   const seen = new Map<string, BidItem>();
   hits.forEach((h, i) => {
     const chunk = t.slice(h.index! + h[0].length, i + 1 < hits.length ? hits[i + 1].index : h.index! + h[0].length + 400).slice(0, 400);
-    const q = chunk.match(/\(?(\d{1,3}(?:,\d{3})*\.\d{3})\)?(?!\d)/);
+    const q = chunk.match(/\(?((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{3})\)?(?!\d)/);
     const u = chunk.match(new RegExp(`(?:^|[\\s|(])(${UNITS})(?:\\s*\\(LS\\))?(?=[\\s|]|$)`));
     const desc = chunk.split(/\s(?:\d{1,3}(?:,\d{3})*\.\d{2,5})(?!\d)/)[0]                    // stop at the first price or amount
-      .replace(/\(?\d{1,3}(?:,\d{3})*\.\d{3}\)?/g, ' ').replace(new RegExp(`(?:^|\\s)(?:${UNITS})(?:\\s*\\(LS\\))?(?=\\s|$)`, 'g'), ' ')
+      .replace(/\(?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{3}\)?/g, ' ').replace(new RegExp(`(?:^|\\s)(?:${UNITS})(?:\\s*\\(LS\\))?(?=\\s|$)`, 'g'), ' ')
       .replace(/\b\d{11}\b/g, ' ').replace(/\|/g, ' ').replace(/\b(?:SECTION|Section Totals|Contract Grand Totals)\b.*$/i, '').replace(/\s+/g, ' ').trim();
     const key = `${h[1]}|${h[2].replace(/\s/g, '')}`;
     if (!desc || !/[A-Z]{3}/.test(desc) || seen.has(key)) return;
     const lumpSum = q ? /^\(/.test(q[0]) : false;
-    seen.set(key, { line: h[1], item: h[2].replace(/\s+/g, ' '), desc: desc.slice(0, 140), qty: q ? Number(q[1].replace(/,/g, '')) : null, unit: lumpSum ? 'LS' : (u ? u[1] : null) });
+    seen.set(key, { line: h[1], item: h[2].replace(/\s+/g, ' '), desc: desc.slice(0, 140), qty: q ? Number(q[1].replace(/,/g, '')) : null, unit: u && u[1] !== 'LS' ? u[1] : lumpSum ? null : (u ? u[1] : null), lumpSum });
   });
   return [...seen.values()];
 }
@@ -586,7 +586,8 @@ const BID_ITEM_TERMS: { label: string; re: RegExp; services: string[] }[] = [
   { label: 'expansion joint work', re: /\bEXPANSION JOINT|\bBRIDGE DECK EXPANSION|\bJOINT (?:REPLACEMENT|REHAB)/, services: [SVC.SS, SVC.WS] },
   { label: 'structural concrete repair', re: /\bEPOXY INJECTION|\bCONCRETE REPAIR|\bCONCRETE STRUCTURE REPAIR|\bPILE JACKET|\bCRACK REPAIR/, services: [SVC.SS, SVC.CD, SVC.GPR] },
 ];
-const fmtQty = (x: BidItem) => x.qty == null ? '' : x.unit === 'LS' ? 'lump sum' : `${x.qty.toLocaleString('en-US', { maximumFractionDigits: 3 })} ${x.unit || ''}`.trim();
+const num = (n: number) => { const [a, b] = String(Math.round(n * 1000) / 1000).split('.'); return a.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (b ? '.' + b : ''); };
+export const fmtQty = (x: BidItem) => x.qty == null ? '' : x.lumpSum ? (x.unit && !(x.qty === 1 && !x.unit) ? `${num(x.qty)} ${x.unit}, lump sum` : 'lump sum') : `${num(x.qty)} ${x.unit || ''}`.trim();
 export function speedyBidItems(items: BidItem[]) {
   const out: (BidItem & { label: string; services: string[] })[] = [];
   for (const x of items) {

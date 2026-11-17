@@ -6,7 +6,7 @@ import {
   normalizeSgs, normalizeUsa, groupPermits, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
   USA_NAICS, usaPayload, usaSearchBody, normalizeOrlandoPlanning, planningWanted, planningSections, planningPayload,
   normalizeCountyCase, countyCaseWanted, countyCasePayload, normalizeSale, groupSales, saleWanted, salePayload,
-  bidTabLinks, parseBidTabItems, bidTabPayload,
+  bidTabLinks, parseBidTabItems, bidTabPayload, fmtQty,
   MD_DATASET, MD_TYPES, normalizeMiamiDadePermit, groupMiamiDade, miamiDadeWanted, miamiDadeSections, miamiDadePayload, mdValue, type MdPermit,
 } from './lib.ts';
 import { DEFAULT_TERMS, type Term } from './terms.ts';
@@ -348,7 +348,7 @@ async function runBidTabs(run: Run, cfg: any, sourceId: string) {
       if (!items.length) { run.note(`${c}: no pay items could be read from the tabulation`); newlyDone.push(c); continue; }
       const { payload, matched } = bidTabPayload(want.get(c)!, c, url, text, items, run.terms);
       if (matched.length) run.counts.relevant++; else run.counts.low++;
-      run.note(`${c}: ${items.length} pay items, ${matched.length} Speedy items${matched.length ? ': ' + matched.slice(0, 4).map(x => `${x.desc.toLowerCase()} ${x.qty ?? ''} ${x.unit ?? ''}`.trim()).join('; ') : ''}`);
+      run.note(`${c}: ${items.length} pay items, ${matched.length} Speedy items${matched.length ? ': ' + matched.slice(0, 4).map(x => `${x.desc.toLowerCase()} (${fmtQty(x)})`).join('; ') : ''}`);
       const r = await run.upsert(payload);
       if (r) newlyDone.push(c);
     } catch (e) { run.counts.errors++; run.note(`${c}: bid tabulation could not be read (${(e as Error).message})`); }

@@ -405,5 +405,31 @@ await t('Miami-Dade permits: grouped by master permit, builder from the master, 
   assert.match(d.title, /^Demolition Building \(demolition, 100 Sw 1 St\)$/);
 });
 
+await t('FDOT bid tabulation: pay items with quantities, Speedy items as documented scope, markings and milling ignored', () => {
+  // synthetic text in the shape the PDF reader returns (items run together, bidder columns repeat on later pages)
+  const text = `Tabulation of Bids Contract: E9X99 The Improvements under this Contract consist of bridge rehabilitation and deck joint replacement on an example road. ` +
+    `Units ( ) indicates item is bid as Lump Sum 0001 StructuresSECTION: 0005 0110 3 REMOVAL OF EXISTING STRUCTURES/BRIDGES 40000000001 (1100.000) SF (LS) 130,000.00000 130,000.00 ` +
+    `75,000.00000 75,000.00 0010 0400 2 10 CONCRETE CLASS II, APPROACH SLABS 7.100 CY 3,000.00000 21,300.00 0025 0458 1 21 BRIDGE DECK EXPANSION JOINT, REHABILITATION, POURED JOINT ` +
+    `570.000 LF 60.00000 34,200.00 0030 0110 4 10 REMOVAL OF EXISTING CONCRETE 4,370.000 SY 12.00000 52,440.00 0035 0327 70 5 MILLING EXISTING ASPHALT PAVEMENT, 2" AVG DEPTH 91,008.000 SY 1.20000 ` +
+    `109,209.60 0040 0713107 PREFERRED/PERMANENT TAPE, REMOVE 63.000 SF 5.50000 346.50 0045 0350 3 1 CONCRETE PAVEMENT SLAB REPLACEMENT 120.000 SY 300.00000 36,000.00 ` +
+    `Page 2 Tabulation of Bids 0030 0110 4 10 REMOVAL OF EXISTING CONCRETE 4,370.000 SY 11.00000 48,070.00`;
+  const items = L.parseBidTabItems(text);
+  assert.equal(items.length, 7, 'repeated bidder pages are not counted twice');
+  const rem = items.find(x => x.line === '0030');
+  assert.equal(rem.qty, 4370); assert.equal(rem.unit, 'SY'); assert.match(rem.desc, /^REMOVAL OF EXISTING CONCRETE/);
+  const br = items.find(x => x.line === '0005');
+  assert.equal(br.qty, 1100); assert.equal(br.lumpSum, true); assert.equal(L.fmtQty(br), '1,100 SF, lump sum');
+  const sp = L.speedyBidItems(items).map(x => x.label);
+  assert.deepEqual(sp.sort(), ['bridge or structure removal', 'concrete removal', 'concrete slab or pavement repair', 'expansion joint work'].sort());
+  const { payload } = L.bidTabPayload('fdot:E9X99', 'E9X99', 'https://example.org/e9x99bidtabs.pdf', text, items);
+  assert.equal(payload.relevance, 'high');
+  assert.ok(payload.evidence.every(e => e.confidence === 'documented' || e.field === 'contract scope'));
+  assert.match(payload.evidence.find(e => e.term === 'bid item: concrete removal').snippet, /4,370 SY/);
+  assert.match(payload.source_summary, /bridge rehabilitation and deck joint replacement/);
+  assert.equal(L.bidTabContract('https://x.org/d1/bidtabs/2026/jan15/e1y27-r0bidtabs.pdf?v=1'), 'E1Y27');
+  assert.equal(L.bidTabContract('https://ftp.example.org/file/abc/T1947-Bid-Tab.pdf'), 'T1947');
+  assert.equal(L.bidTabContract('https://ftp.example.org/file/abc/E7U43BidTabs.pdf'), 'E7U43');
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);
