@@ -797,11 +797,16 @@ await test('Duplicates: same awardee across sources is suggested, a manager merg
   assert.ok(tl.some(e => e.kind === 'merged') && tl.some(e => e.kind === 'award'));
   assert.equal((await m.rpc('duplicate_candidates')).filter(x => /Dup test/i.test(x.a.title + x.b.title)).length, 0);
   // two different jobs for the same contractor can be marked separate and are not suggested again
-  await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, county: null, region: null, external_key: 'dup:c', source_id: 'sam_gov', title: 'Dup test complex lift station repair phase 2', solicitation_no: 'DUPC3',
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, county: null, region: null, external_key: 'dup:c', source_id: 'usaspending_awards', title: 'Dup test complex lift station repair phase 2', solicitation_no: 'DUPC3',
     opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Dup C' } } });
   const c2 = (await m.rpc('duplicate_candidates')).find(x => /phase 2/.test(x.a.title + x.b.title));
   assert.ok(c2);
   await m.rpc('separate_projects', { p_a: c2.a.id, p_b: c2.b.id, p_note: 'different phase' });
+  // one source never lists the same job twice under different numbers: two FDOT contracts for one contractor are not suggested
+  for (const [k, t] of [['dup:f1', 'FDOT contract DUPF1, Dup County'], ['dup:f2', 'FDOT contract DUPF2, Dup County']])
+    await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, external_key: k, source_id: 'fdot_lettings', title: t, solicitation_no: k.slice(4).toUpperCase(),
+      winner: { name: 'Dup Paving Co', status: 'low_bidder', as_of: today }, opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: t } } });
+  assert.equal((await m.rpc('duplicate_candidates')).filter(x => /DUPF/.test(x.a.title + x.b.title)).length, 0);
   assert.equal((await m.rpc('duplicate_candidates')).filter(x => /phase 2/.test(x.a.title + x.b.title)).length, 0);
 });
 
