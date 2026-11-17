@@ -316,9 +316,11 @@ async function pdfText(run: Run, url: string): Promise<string> {
 }
 async function runBidTabs(run: Run, cfg: any, sourceId: string) {
   const days = cfg.lookback_days ?? 150;
-  const { data: rows, error } = await db.from('projects').select('external_key, solicitation_no, published_at')
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  // the letting date is the project deadline; published_at is not set for lettings
+  const { data: rows, error } = await db.from('projects').select('external_key, deadline, created_at')
     .eq('source_id', 'fdot_lettings').like('external_key', 'fdot:%').is('merged_into', null)
-    .gte('published_at', new Date(Date.now() - days * 86400000).toISOString().slice(0, 10));
+    .or(`deadline.gte.${since},created_at.gte.${since}`);
   if (error) throw new Error(error.message);
   const done = new Set<string>((cfg.done || []) as string[]);
   const want = new Map<string, string>();
