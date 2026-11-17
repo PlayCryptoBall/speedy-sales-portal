@@ -522,6 +522,42 @@ async function authorize(req: Request): Promise<{ ok: boolean; user: string | nu
 
 // ---------------------------------------------------------------- missed-opportunity check: read one record and classify it
 // Managers paste a SAM.gov notice, a USAspending award or an Orlando permit. Nothing is saved unless they choose Import.
+// ---------------------------------------------------------------- re-check projects against their own source
+// Used for imported or stale leads: re-reads the SAM.gov notice behind each project and saves the facts through the normal
+// refresh path, keyed to the existing project, so curated text and sales work stay as they are. Never creates a lead.
+async function verifyProjects(ids: string[], user: string | null) {
+  const { data: rows, error } = await db.from('projects').select('id, external_key, source_url, winner_name, title').in('id', ids.slice(0, 80));
+  if (error) throw new Error(error.message);
+  const { data: runId, error: e2 } = await db.rpc('refresh_start_run', { p_source: 'sam_gov', p_trigger: user ? 'manual' : 'schedule', p_user: user, p_attempt: 1 });
+  if (e2) throw new Error(e2.message);
+  const run = new Run(runId as number, 700, 120, 140000);
+  run.note(`re-check ${rows?.length || 0} projects against their source`);
+  await loadTerms(run);
+  const out: any[] = [];
+  for (const r of rows || []) {
+    if (run.timeUp()) { run.note('time budget reached'); break; }
+    const sam = String(r.source_url || '').match(/sam\.gov\/(?:opp|workspace\/contract\/opp)\/([0-9a-f]{32})/i);
+    if (!sam) { out.push({ id: r.id, result: 'no_reader', url: r.source_url }); continue; }
+    try {
+      const det = await run.get(`https://sam.gov/api/prod/opps/v2/opportunities/${sam[1].toLowerCase()}`, 'application/hal+json');
+      const n = normalizeDetails(det);
+      if (!n) { out.push({ id: r.id, result: 'not_found' }); run.note(`${r.external_key}: SAM.gov did not return the notice`); continue; }
+      const facts = samFacts([n], det);
+      const p = samPayload(n.sol || sam[1], [n], facts, true, run.terms);
+      p.alt_keys = [...((p.alt_keys as string[]) || []), r.external_key];
+      const awardee = (p.winner as any)?.name;
+      if (r.winner_name && p.winner) delete p.winner;             // the project already names its contractor; do not open a second lead
+      const res: any = await run.upsert(p);
+      out.push({ id: r.id, result: res ? 'verified' : 'save_failed', stage: facts.stage, awardee: awardee || null, relevance: p.relevance,
+        evidence: ((p.evidence as any[]) || []).map(e => `${e.term} (${e.confidence})`), changes: res?.material || [] });
+      run.note(`${r.external_key}: ${res ? 'verified' : 'save failed'}; ${facts.stage}${awardee ? `, awardee ${awardee}` : ''}; relevance ${p.relevance}; ` +
+        `evidence: ${((p.evidence as any[]) || []).map(e => e.term).join(', ') || 'none'}`);
+    } catch (e) { out.push({ id: r.id, result: 'error', error: (e as Error).message }); }
+  }
+  await db.rpc('refresh_finish_run', { p_run: runId, p_status: run.counts.errors ? 'partial' : 'success', p_counts: run.counts, p_log: run.log, p_error: null });
+  return { run_id: runId, results: out };
+}
+
 async function probe(input: string, doImport: boolean, user: string) {
   const run = new Run(0, 300, 12, 60000);
   await loadTerms(run);
@@ -597,6 +633,7 @@ Deno.serve(async (req) => {
   }
   const work = (async () => {
     if (source === 'retry_failed') return retryFailed();
+    if (source === 'verify') return verifyProjects((body.projects || []).map(String), auth.user);
     if (source === 'maintenance') return db.rpc('daily_maintenance');
     const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales', 'miamidade_permits'] : [source];
     const out = [];
