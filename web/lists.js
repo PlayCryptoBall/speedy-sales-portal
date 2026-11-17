@@ -6,6 +6,8 @@
 
   // ---------------------------------------------------------------- ordering
   const pr = { Hot: 0, Warm: 1, Later: 2 };
+  const CLS = { Hot: 0, Warm: 1, 'Early Signal': 2, 'Needs Review': 3, 'Low Fit': 4, Expired: 5 };
+  const clsRank = (r) => r.lead_class ? CLS[r.lead_class] ?? 6 : pr[r.priority] ?? 6;
   const regionRank = (r) => { const i = P.REGIONS.indexOf(r.region || 'Unknown'); return i < 0 ? 9 : i; };
   const score = (r) => (r.fit_score || 0) + (r.urgency_score || 0);
   const ts = (v) => v ? new Date(v.length === 10 ? v + 'T12:00:00' : v).getTime() : null;
@@ -18,14 +20,15 @@
   };
   const dlKey = (r) => { const t = ts(r.deadline); if (t == null) return [2, 0]; return t >= Date.now() ? [0, t] : [1, -t]; };
   const SORTS = {
-    priority: (a, b) => (pr[a.priority] ?? 3) - (pr[b.priority] ?? 3) || score(b) - score(a) || regionRank(a) - regionRank(b),
+    priority: (a, b) => clsRank(a) - clsRank(b) || (b.lead_score ?? score(b)) - (a.lead_score ?? score(a)) || regionRank(a) - regionRank(b),
+    score: (a, b) => (b.lead_score ?? -1) - (a.lead_score ?? -1) || clsRank(a) - clsRank(b),
     urgency: (a, b) => nextDate(a) - nextDate(b) || (b.urgency_score || 0) - (a.urgency_score || 0) || SORTS.priority(a, b),
     deadline: (a, b) => { const x = dlKey(a), y = dlKey(b); return x[0] - y[0] || x[1] - y[1] || SORTS.priority(a, b); },
     region: (a, b) => regionRank(a) - regionRank(b) || SORTS.priority(a, b),
     newest: (a, b) => String(b.created_at).localeCompare(String(a.created_at)),
     activity: (a, b) => String(b.last_activity_at || '').localeCompare(String(a.last_activity_at || '')),
   };
-  const SORT_LABEL = { urgency: 'Most urgent', priority: 'Priority', deadline: 'Deadline', region: 'Closest to Orlando', newest: 'Newest', activity: 'Recent activity' };
+  const SORT_LABEL = { score: 'Score', urgency: 'Most urgent', priority: 'Best first', deadline: 'Deadline', region: 'Closest to Orlando', newest: 'Newest', activity: 'Recent activity' };
   P.SORTS = SORTS;
 
   // ---------------------------------------------------------------- filters
@@ -49,6 +52,8 @@
     deadline: { label: 'Deadline', opts: () => [['7', 'Next 7 days'], ['14', 'Next 14 days'], ['30', 'Next 30 days'], ['passed', 'Already passed'], ['none', 'No deadline']],
       test: (r, v) => v === 'none' ? !r.deadline : v === 'passed' ? !!r.deadline && ts(r.deadline) < Date.now() : P.isOpenBid(r) && P.dayDiff(r.deadline) <= Number(v) },
     priority: { label: 'Priority', opts: () => [['Hot', 'Hot'], ['Warm', 'Warm'], ['Later', 'Later']], test: (r, v) => r.priority === v },
+    cls: { label: 'Lead class', opts: () => Object.keys(CLS).map(k => [k, k]), test: (r, v) => r.lead_class === v },
+    office: { label: 'Office', opts: () => [['Orlando', 'Orlando'], ['Tampa', 'Tampa'], ['Fort Lauderdale', 'Fort Lauderdale'], ['Jacksonville', 'Jacksonville'], ['none', 'Unassigned']], test: (r, v) => v === 'none' ? !r.office : r.office === v },
     owner: { label: 'Assignee', opts: (rows) => [['none', 'Unclaimed'], ['me', 'Me'], ...[...new Map(rows.filter(r => r.owner_id && r.owner_id !== me().id).map(r => [r.owner_id, r.owner_name || 'Teammate'])).entries()].sort((a, b) => a[1].localeCompare(b[1]))],
       test: (r, v) => v === 'none' ? !r.owner_id : v === 'me' ? r.owner_id === me().id : r.owner_id === v },
     stage: { label: 'Status', opts: () => (me().stages || []).map(s => [s.key, s.key === 'available' ? 'Unclaimed' : s.label]), test: (r, v) => r.stage === v },
@@ -85,15 +90,19 @@
   const conflict = (r) => r.company_owners?.length && r.owner_id !== me().id
     ? `<div class="li-warn">${esc(r.company_owners.map(o => o.name).join(', '))} also working this company</div>` : '';
   let common = new Set();   // next-action texts shared by many rows on screen (generic advice)
-  const nextLine = (r) => r.next_action && !common.has(r.next_action) ? `<div class="li-next"><b>Next:</b> ${esc(r.next_action)}</div>` : '';
+  const nextLine = (r) => r.next_action && !common.has(r.next_action) ? `<div class="li-next"><b>Next:</b> ${esc(r.next_action)}</div>`
+    : r.research_task ? `<div class="li-next"><b>First:</b> ${esc(r.research_task)}</div>` : r.score_action ? `<div class="li-next"><b>Next:</b> ${esc(r.score_action)}</div>` : '';
+  const svcText = (r) => { const s = (r.services_confirmed?.length ? r.services_confirmed : r.services || []).slice(0, 2); return s.length ? `<span>${P.icon('saw')}${esc(s.join(', '))}</span>` : ''; };
+  const fresh = (r) => r.last_verified_at ? `<span class="faint" title="Last checked against the source">checked ${esc(P.ago(r.last_verified_at))}</span>` : (r.source_id && r.source_id !== 'legacy_import' ? '' : '<span class="faint">not re-checked</span>');
+  const barCls = (r) => r.lead_class ? { Hot: 'hot', Warm: 'warm' }[r.lead_class] || '' : r.priority === 'Hot' ? 'hot' : r.priority === 'Warm' ? 'warm' : '';
 
   function rowHtml(r, mode) {
-    const bar = `<div class="bar ${r.priority === 'Hot' ? 'hot' : r.priority === 'Warm' ? 'warm' : ''}" aria-hidden="true"></div>`;
+    const bar = `<div class="bar ${barCls(r)}" aria-hidden="true"></div>`;
     const label = `${P.companyOf(r)}: ${r.project_title || r.title}`;
     if (mode === 'gov') {
       const agency = r.project_owner || r.company_name || '';
       return `<div class="li gov" data-lead="${r.id}">${bar}${ui.dtile(r)}
-        <div class="li-main"><div class="li-top"><a class="li-co" href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.project_title || r.title)}</a>${ui.prio(r.priority)}</div>
+        <div class="li-main"><div class="li-top"><a class="li-co" href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.project_title || r.title)}</a>${ui.cls(r)}</div>
           <div class="li-title">${esc(agency)}${r.solicitation_no ? ` <span class="faint">· ${esc(r.solicitation_no)}</span>` : ''}</div>
           <div class="li-meta"><span>${P.icon('pin')}${esc(P.place(r))}</span><span>${esc(P.PSTAGE[r.project_stage] || '')}</span>${r.project_value ? `<span>${P.icon('dollar')}${esc(P.money(r.project_value))}</span>` : r.value_label ? `<span>${esc(r.value_label)}</span>` : ''}${r.winner_name ? `<span>${r.winner_status === 'low_bidder' ? 'Low bidder' : 'Winner'}: ${esc(r.winner_name)}</span>` : ''}</div>
           ${nextLine(r)}</div>
@@ -103,9 +112,9 @@
       : mode === 'mine' ? ui.stage(r.stage)
       : `${ownerCell(r, mode)}${r.stage === 'available' ? claimBtn(r) : ui.stage(r.stage)}`;
     return `<div class="li" data-lead="${r.id}">${bar}
-      <div class="li-main"><div class="li-top"><a class="li-co" href="#/lead/${r.id}" data-lead="${r.id}" aria-label="${esc(label)}">${esc(P.companyOf(r))}</a>${ui.prio(r.priority)}${r.needs_review && P.isMgr() ? '<span class="badge warm">Review</span>' : ''}${r.stale ? '<span class="badge warm">No recent activity</span>' : ''}</div>
+      <div class="li-main"><div class="li-top"><a class="li-co" href="#/lead/${r.id}" data-lead="${r.id}" aria-label="${esc(label)}">${esc(P.companyOf(r))}</a>${ui.cls(r)}${r.needs_review && P.isMgr() ? '<span class="badge warm">Review</span>' : ''}${r.stale ? '<span class="badge warm">No recent activity</span>' : ''}</div>
         <div class="li-title">${esc(r.project_title || r.title)}</div>
-        <div class="li-meta"><span>${P.icon('pin')}${esc(P.place(r))}</span>${r.project_stage && r.project_stage !== 'unknown' ? `<span>${esc(P.PSTAGE[r.project_stage])}</span>` : ''}${keyDate(r)}</div>
+        <div class="li-meta"><span>${P.icon('pin')}${esc(P.place(r))}${r.office && r.office !== 'Orlando' ? ` · ${esc(r.office)} office` : ''}</span>${r.project_stage && r.project_stage !== 'unknown' ? `<span>${esc(P.PSTAGE[r.project_stage])}</span>` : ''}${svcText(r)}${keyDate(r)}${fresh(r)}</div>
         ${nextLine(r)}${conflict(r)}</div>
       <div class="li-side">${side}</div></div>`;
   }
@@ -117,20 +126,22 @@
     const second = gov ? (r.project_owner || r.company_name || '') : (r.project_title || r.title);
     const foot = r.stage === 'available' ? `<span class="who">${mode === 'pool' ? esc(P.KIND[r.kind] || '') : 'Unclaimed'}</span>${claimBtn(r)}`
       : `<span class="who">${r.owner_id === me().id ? 'You' : esc(r.owner_name || '')}</span>${ui.stage(r.stage)}`;
-    return `<div class="lcard ${r.priority === 'Hot' ? 'hot' : r.priority === 'Warm' ? 'warm' : ''}" data-lead="${r.id}">
-      <div class="top">${gov ? ui.dtile(r) : ''}<div class="grow" style="min-width:0"><div class="row" style="flex-wrap:nowrap"><a class="co" href="#/lead/${r.id}" data-lead="${r.id}">${esc(title)}</a>${ui.prio(r.priority)}</div><div class="pj">${esc(second)}</div></div></div>
+    return `<div class="lcard ${barCls(r)}" data-lead="${r.id}">
+      <div class="top">${gov ? ui.dtile(r) : ''}<div class="grow" style="min-width:0"><div class="row" style="flex-wrap:nowrap"><a class="co" href="#/lead/${r.id}" data-lead="${r.id}">${esc(title)}</a>${ui.cls(r)}</div><div class="pj">${esc(second)}</div></div></div>
       <div class="facts"><span>${P.icon('pin')}<span class="ell">${esc(P.place(r))}</span></span>
         ${r.project_stage && r.project_stage !== 'unknown' ? `<span>${P.icon('flag')}<span class="ell">${esc(P.PSTAGE[r.project_stage])}</span></span>` : ''}
         ${gov && (r.project_value || r.value_label) ? `<span>${P.icon('dollar')}${esc(P.money(r.project_value) || r.value_label)}</span>` : ''}
         ${!gov && keyDate(r) ? `<span>${keyDate(r)}</span>` : ''}
         ${gov ? `<span>${ui.route(r.approach)}</span>` : ''}</div>
-      ${r.next_action ? `<div class="small" style="color:var(--ink-2)"><span class="muted">Next:</span> ${esc(r.next_action)}</div>` : ''}
+      ${r.next_action || r.research_task ? `<div class="small" style="color:var(--ink-2)"><span class="muted">${r.next_action ? 'Next' : 'First'}:</span> ${esc(r.next_action || r.research_task)}</div>` : ''}
       <div class="foot">${foot}</div></div>`;
   }
 
   // table columns
   const COLS = {
-    prio: ['', r => `<span class="dot ${r.priority === 'Hot' ? 'hot' : r.priority === 'Warm' ? 'warm' : ''}" title="${esc(r.priority || '')}"></span>`, 'prio-cell'],
+    prio: ['', r => `<span class="dot ${barCls(r)}" title="${esc(r.lead_class || r.priority || '')}"></span>`, 'prio-cell'],
+    score: ['Score', r => r.lead_class ? `${ui.cls(r)}` : '<span class="faint">—</span>'],
+    service: ['Service', r => esc((r.services_confirmed?.length ? r.services_confirmed : r.services || []).slice(0, 2).join(', ')) || '<span class="faint">—</span>'],
     company: ['Company and project', r => `<a class="cell-main" href="#/lead/${r.id}" data-lead="${r.id}">${esc(P.companyOf(r))}</a><div class="sub">${esc(r.project_title || r.title)}</div>`, 'wrap-lg'],
     agency: ['Project and agency', r => `<a class="cell-main" href="#/lead/${r.id}" data-lead="${r.id}">${esc(r.project_title || r.title)}</a><div class="sub">${esc(r.project_owner || r.company_name || '')}${r.solicitation_no ? ' · ' + esc(r.solicitation_no) : ''}</div>`, 'wrap-lg'],
     where: ['Location', r => `${esc(cityOf(r) || '—')}<div class="sub">${esc(r.region || 'Unknown')}</div>`],
@@ -159,10 +170,13 @@
   const LISTS = {
     pool: {
       title: 'Available', base: r => r.stage === 'available' && !r.needs_review,
-      sub: (n) => `${P.plural(n, 'lead')} ready to claim, ranked by fit and timing. Claim one before you call so nobody doubles up.`,
-      sort: 'priority', sorts: ['priority', 'urgency', 'region', 'newest'], views: ['list', 'cards', 'table'],
-      filters: ['region', 'county', 'city', 'zip', 'kind', 'service', 'scope', 'category', 'pstage', 'source', 'deadline', 'priority', 'fresh'],
-      cols: ['prio', 'company', 'where', 'pstage', 'keydate', 'next', 'claim'], mode: 'pool',
+      sub: (n) => `${P.plural(n, 'lead')} ready to contact, ranked by a 0-100 score (evidence, someone to call, timing, territory, size, freshness). Claim one before you call so nobody doubles up.`,
+      subCount: r => ['Hot', 'Warm'].includes(r.lead_class) || !r.lead_class,
+      tabs: [['ready', 'Ready to contact', r => ['Hot', 'Warm'].includes(r.lead_class) || !r.lead_class], ['early', 'Early signal', r => r.lead_class === 'Early Signal'],
+             ['check', 'Needs a check', r => r.lead_class === 'Needs Review'], ['low', 'Low fit or expired', r => ['Low Fit', 'Expired'].includes(r.lead_class)]],
+      sort: 'priority', sorts: ['priority', 'score', 'urgency', 'region', 'newest'], views: ['list', 'cards', 'table'],
+      filters: ['office', 'region', 'county', 'city', 'zip', 'kind', 'service', 'scope', 'category', 'pstage', 'source', 'deadline', 'cls', 'fresh'],
+      cols: ['prio', 'company', 'score', 'where', 'service', 'pstage', 'keydate', 'next', 'claim'], mode: 'pool',
       none: ['Nothing to claim right now', 'Every lead is claimed. New ones arrive with each refresh.'],
     },
     mine: {
@@ -171,7 +185,7 @@
       subCount: r => P.ACTIVE.includes(r.stage),
       tabs: [['active', 'Active', r => P.ACTIVE.includes(r.stage)], ['nurture', 'Nurture', r => r.stage === 'nurture'], ['closed', 'Closed', r => P.CLOSED.includes(r.stage)]],
       sort: 'urgency', sorts: ['urgency', 'priority', 'activity', 'newest'], views: ['list', 'board', 'table', 'cards'],
-      filters: ['followup', 'stage', 'priority', 'region', 'kind', 'deadline', 'source'],
+      filters: ['followup', 'stage', 'cls', 'region', 'kind', 'deadline', 'source'],
       cols: ['prio', 'company', 'status', 'followup', 'next', 'last'], mode: 'mine',
       none: ['No leads here yet', 'Claim leads from Available and they show up here.'], noneAction: '<a class="btn primary" href="#/pool">Browse available leads</a>',
     },
@@ -182,8 +196,8 @@
       tabs: [['open', 'Open', r => notClosed(r) && !(r.stage === 'available' && r.needs_review)], ['claimed', 'Being worked', r => P.ACTIVE.includes(r.stage)],
              ['stalled', 'Stalled', r => r.stale], ['review', 'Needs review', r => r.needs_review], ['all', 'Everything', r => true]],
       sort: 'priority', sorts: ['priority', 'urgency', 'activity', 'newest', 'region'], views: ['table', 'list', 'board', 'cards'],
-      filters: ['owner', 'stage', 'followup', 'priority', 'region', 'county', 'kind', 'scope', 'category', 'source', 'deadline', 'fresh'],
-      cols: ['prio', 'company', 'where', 'owner', 'status', 'followup', 'last', 'verified'], mode: 'all',
+      filters: ['owner', 'stage', 'followup', 'cls', 'office', 'region', 'county', 'kind', 'scope', 'category', 'source', 'deadline', 'fresh'],
+      cols: ['prio', 'company', 'score', 'where', 'owner', 'status', 'followup', 'last', 'verified'], mode: 'all',
       actions: () => `<button class="btn" data-act="addLead">${P.icon('plus')}Add a lead</button>`,
       none: ['Nothing matches', 'Clear the filters to see every lead.'],
     },
@@ -195,8 +209,8 @@
              ['pending', 'Award pending', r => r.project_stage === 'bid_closed' && !govClosed(r)], ['awarded', 'Awarded', r => P.WINNER_STAGES.includes(r.project_stage) && !govClosed(r)],
              ['closed', 'Closed', govClosed], ['all', 'All', r => true]],
       sort: 'deadline', sorts: ['deadline', 'priority', 'newest', 'activity'], views: ['list', 'table', 'cards'],
-      filters: ['route', 'region', 'county', 'owner', 'source', 'deadline', 'priority', 'stage'],
-      cols: ['prio', 'deadline', 'agency', 'where', 'value', 'pstage', 'route', 'owner'], mode: 'gov',
+      filters: ['route', 'cls', 'office', 'region', 'county', 'owner', 'source', 'deadline', 'stage'],
+      cols: ['prio', 'deadline', 'agency', 'score', 'where', 'value', 'pstage', 'route', 'owner'], mode: 'gov',
       none: ['No government work here', 'Try another tab or clear the filters.'],
     },
   };
@@ -309,7 +323,7 @@
     const f = st(), showClosed = !!f.closedCols;
     const owned = rows.filter(r => r.owner_id);
     const stages = P.ACTIVE.concat(showClosed ? CLOSED_COLS : []);
-    const card = (r) => `<div class="bcard ${r.priority === 'Hot' ? 'hot' : r.priority === 'Warm' ? 'warm' : ''}" draggable="true" data-lead="${r.id}" data-stage="${r.stage}">
+    const card = (r) => `<div class="bcard ${barCls(r)}" draggable="true" data-lead="${r.id}" data-stage="${r.stage}">
         <a class="co" href="#/lead/${r.id}" data-lead="${r.id}" draggable="false">${esc(P.companyOf(r))}</a><div class="pj">${esc(r.project_title || r.title)}</div>
         <div class="meta">${r.next_action_due && P.ACTIVE.includes(r.stage) ? ui.due(r.next_action_due) : ''}${key === 'all' ? `<span>${esc(r.owner_id === me().id ? 'You' : r.owner_name || '')}</span>` : ''}${r.stale ? '<span class="badge warm">No recent activity</span>' : ''}</div>
         <button class="btn ghost sm icon mv" data-act="moveMenu" data-id="${r.id}" aria-label="Move ${esc(P.companyOf(r))} to another stage" title="Move to…">${P.icon('more')}</button></div>`;
@@ -405,7 +419,7 @@
       if (L.mgr && !P.isMgr()) { view.innerHTML = P.pageHead({ title: L.title }) + P.empty('Managers only', 'This page is for managers.', '<a class="btn" href="#/today">Go to Today</a>'); return; }
       P.state.curList = key;
       const f = P.state.filters[key] = P.state.filters[key] || { sort: L.sort, tab: L.tabs?.[0][0] };
-      // start-up parameters from links (e.g. #/pool?priority=Hot) override the remembered filters once
+      // start-up parameters from links (e.g. #/pool?cls=Hot) override the remembered filters once
       if (Object.keys(r.params).length) {
         L.filters.forEach(k => delete f[k]);
         for (const [k, v] of Object.entries(r.params)) {
@@ -463,8 +477,8 @@
     if (b.my_deadlines.length) line.push(`<b>${b.my_deadlines.length}</b> deadline${b.my_deadlines.length === 1 ? '' : 's'} this week`);
     const terr = (b.territory || []).join(', ');
     const finds = [];
-    if (b.new_hot.length) finds.push(`<a href="#/pool?priority=Hot&sort=newest"><b>${b.new_hot.length}</b> new Hot lead${b.new_hot.length === 1 ? '' : 's'} in ${esc(terr)}</a>${b.new_hot_elsewhere ? ` (+${b.new_hot_elsewhere} elsewhere in Florida)` : ''}`);
-    else if (b.new_hot_elsewhere) finds.push(`<a href="#/pool?priority=Hot&sort=newest"><b>${b.new_hot_elsewhere}</b> new Hot lead${b.new_hot_elsewhere === 1 ? '' : 's'} outside ${esc(terr)}</a>`);
+    if (b.new_hot.length) finds.push(`<a href="#/pool?cls=Hot&sort=newest"><b>${b.new_hot.length}</b> new Hot lead${b.new_hot.length === 1 ? '' : 's'} in ${esc(terr)}</a>${b.new_hot_elsewhere ? ` (+${b.new_hot_elsewhere} elsewhere in Florida)` : ''}`);
+    else if (b.new_hot_elsewhere) finds.push(`<a href="#/pool?cls=Hot&sort=newest"><b>${b.new_hot_elsewhere}</b> new Hot lead${b.new_hot_elsewhere === 1 ? '' : 's'} outside ${esc(terr)}</a>`);
     if (b.new_awards.length) finds.push(`<a href="#/pool?sort=newest"><b>${b.new_awards.length}</b> new contractor award${b.new_awards.length === 1 ? '' : 's'} to call</a>`);
     if (b.new_matching) finds.push(`<b>${b.new_matching}</b> new lead${b.new_matching === 1 ? '' : 's'} for your services`);
     const t = b.team, team = [];
@@ -472,7 +486,7 @@
       if (t.new_relevant) team.push(`<b>${t.new_relevant}</b> relevant project${t.new_relevant === 1 ? '' : 's'} found`);
       if (t.new_awards) team.push(`<b>${t.new_awards}</b> award${t.new_awards === 1 ? '' : 's'} posted`);
       if (t.awaiting_review) team.push(`<a href="#/sources?tab=review"><b>${t.awaiting_review}</b> waiting for your review</a>`);
-      if (t.unowned_hot) team.push(`<a href="#/pool?priority=Hot"><b>${t.unowned_hot}</b> Hot unclaimed</a>`);
+      if (t.unowned_hot) team.push(`<a href="#/pool?cls=Hot"><b>${t.unowned_hot}</b> Hot unclaimed</a>`);
       const od = (t.overdue_by_person || []).reduce((n, x) => n + x.n, 0);
       if (od) team.push(`<b>${od}</b> team follow-up${od === 1 ? '' : 's'} overdue`);
       if ((t.failed_sources || []).length) team.push(`<span class="due-hot">${esc(t.failed_sources.join(', '))} did not refresh</span>`);
@@ -494,9 +508,12 @@
     const groups = workQueue(board, uid);
     const queueCount = groups.reduce((n, g) => n + g[2].length, 0);
     const pool = board.filter(r => r.stage === 'available' && !r.needs_review);
-    const hotAll = pool.filter(r => r.priority === 'Hot').sort(SORTS.priority);
+    const isHot = (r) => r.lead_class ? r.lead_class === 'Hot' : r.priority === 'Hot';
+    const hotAll = pool.filter(isHot).sort(SORTS.priority);
     const terr = (P.state.me.prefs?.territory || ['Central FL']);
     const hotMine = hotAll.filter(r => terr.includes(r.region));
+    // the five best leads to contact: Hot and Warm, highest score, the salesperson's territory first
+    const best = pool.filter(r => ['Hot', 'Warm'].includes(r.lead_class)).sort((a, b) => (terr.includes(b.region) - terr.includes(a.region)) || SORTS.score(a, b)).slice(0, 5);
     const deadlines = board.filter(r => P.isOpenBid(r) && P.dayDiff(r.deadline) <= 7 && (r.owner_id === uid || (r.stage === 'available' && !r.needs_review))).sort(SORTS.deadline);
     const dateLine = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
     const notes = P.state.notes || [];
@@ -508,7 +525,7 @@
       const teamOverdue = active.filter(r => r.next_action_due && r.next_action_due < today).length;
       const newToday = board.filter(r => r.created_at && r.created_at.slice(0, 10) >= P.addDays(-1) && !r.needs_review && r.stage === 'available').length;
       kpis = `<div class="kpis">
-        <a class="kpi ${hotAll.length ? 'attn' : ''}" href="#/pool?priority=Hot"><div class="lbl">Hot leads nobody owns</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a>
+        <a class="kpi ${hotAll.length ? 'attn' : ''}" href="#/pool?cls=Hot"><div class="lbl">Hot leads nobody owns</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a>
         <a class="kpi ${review ? 'attn' : ''}" href="#/sources?tab=review"><div class="lbl">Waiting for your review</div><div class="val">${review}</div><div class="sub">New finds salespeople cannot see yet</div></a>
         <a class="kpi ${teamOverdue ? 'attn' : ''}" href="#/team?tab=accountability"><div class="lbl">Team follow-ups overdue</div><div class="val">${teamOverdue}</div><div class="sub">Across ${P.plural(new Set(active.filter(r => r.next_action_due && r.next_action_due < today).map(r => r.owner_id)).size, 'person', 'people')}</div></a>
         <a class="kpi" href="#/all?tab=claimed"><div class="lbl">Leads being worked</div><div class="val">${active.length}</div><div class="sub">${newToday ? `${newToday} new in the pool since yesterday` : 'No new pool leads since yesterday'}</div></a></div>`;
@@ -517,7 +534,7 @@
         <button class="kpi ${queueCount ? 'attn' : ''}" data-act="jump" data-to="sec-calls"><div class="lbl">Calls and follow-ups</div><div class="val">${queueCount}</div><div class="sub">${groups.length ? esc(groups.slice(0, 2).map(g => `${g[2].length} ${g[1].toLowerCase()}`).join(' · ')) : 'You are caught up'}</div></button>
         <a class="kpi" href="#/mine"><div class="lbl">My active leads</div><div class="val">${my.length}</div><div class="sub">${my.filter(r => ['quote_needed', 'quote_sent'].includes(r.stage)).length} at the quote stage</div></a>
         <button class="kpi ${deadlines[0] && P.dayDiff(deadlines[0].deadline) <= 2 ? 'attn' : ''}" data-act="jump" data-to="sec-dl"><div class="lbl">Deadlines in 7 days</div><div class="val">${deadlines.length}</div><div class="sub">${deadlines[0] ? `Next: ${esc(P.date(deadlines[0].deadline))}` : 'None this week'}</div></button>
-        <a class="kpi" href="#/pool?priority=Hot"><div class="lbl">Hot leads to claim</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a></div>`;
+        <a class="kpi" href="#/pool?cls=Hot"><div class="lbl">Hot leads to claim</div><div class="val">${hotAll.length}</div><div class="sub">${hotMine.length} in ${esc(terr.join(', '))}</div></a></div>`;
     }
 
     const LIMIT = 4;
@@ -527,7 +544,8 @@
       : P.empty(my.length ? 'You are caught up' : 'No leads yet', my.length ? 'Nothing overdue, due today, or waiting on you.' : 'Claim a lead from Available to start your call list.', my.length ? '' : '<a class="btn primary" href="#/pool">Browse available leads</a>', 'sm');
     const dlBody = deadlines.length ? `<div>${deadlines.slice(0, 5).map(r => mini(r, `<span class="small ${P.dayDiff(r.deadline) <= 2 ? 'due-hot' : ''}">${esc(P.date(r.deadline))} · ${esc(P.rel(P.dayDiff(r.deadline)))}</span>`,
         `${r.owner_id === uid ? 'Yours' : 'Unclaimed'} · ${esc((P.APPROACH[r.approach] || [''])[0])}`)).join('')}</div>` : '';
-    const hotBody = (hotMine.length ? hotMine : hotAll).slice(0, 4).map(r => mini(r, claimBtn(r), (r.services || []).length ? `<span class="muted">Likely work:</span> ${esc(r.services.slice(0, 3).join(', '))}` : '')).join('');
+    const why = (r) => (r.priority_summary || '').replace(/^\d+\/100\.\s*/, '').split('. ').slice(0, 2).join('. ');
+    const hotBody = best.map(r => mini(r, `${ui.cls(r)} ${claimBtn(r)}`, esc(why(r)))).join('');
     const teamBody = mgr ? (() => {
       const people = {};
       board.filter(r => r.owner_id && P.ACTIVE.includes(r.stage)).forEach(r => { const p = people[r.owner_id] ||= { name: r.owner_name, n: 0, od: 0, q: 0 }; p.n++; if (r.next_action_due && r.next_action_due < today) p.od++; if (['quote_needed', 'quote_sent'].includes(r.stage)) p.q++; });
@@ -550,7 +568,7 @@
         </div>
         <div class="stack">
           ${mgr && my.length ? card('sec-team', 'Team workload', null, teamBody, viewAll('#/team?tab=people', 'Team')) : ''}
-          ${hotBody ? card('sec-hot', hotMine.length ? `Hot leads in ${terr.join(', ')}` : 'Hot leads worth claiming', (hotMine.length ? hotMine : hotAll).length, `<div>${hotBody}</div>`, viewAll('#/pool?priority=Hot')) : ''}
+          ${hotBody ? card('sec-hot', 'Best 5 to contact', null, `<div>${hotBody}</div>`, viewAll('#/pool?tab=ready&sort=score')) : ''}
           ${noteBody ? card('sec-new', 'Recent updates', null, noteBody, '<button class="btn ghost sm" data-act="notifications">View all</button>') : ''}
         </div>
       </div>`;

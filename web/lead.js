@@ -72,13 +72,16 @@
       ref: `${esc(o.ref)} · ${esc(P.KIND[o.kind] || o.kind)}`,
       tools: o.project?.source_url ? `<a class="btn ghost sm desk-only" href="${P.url(p.source_url)}" target="_blank" rel="noopener">${P.icon('ext', 'sm')}Source</a>` : '',
       title: o.company?.id ? `<a href="#/today?company=${o.company.id}" data-company="${o.company.id}" class="co-link">${esc(company)}</a>` : esc(company), sub: esc(p.title || o.title),
-      meta: `${ui.prio(o.priority, true)}<span>${P.icon('pin')}${esc(P.place(p))}</span>${p.stage ? `<span>${esc(P.PSTAGE[p.stage] || p.stage)}</span>` : ''}${dl}`,
+      meta: `${ui.cls({ lead_class: o.lead_class || o.priority_reasons?.lead_class, lead_score: o.lead_score ?? o.priority_reasons?.lead_score, priority: o.priority, priority_summary: o.priority_reasons?.summary })}<span>${P.icon('pin')}${esc(P.place(p))}</span>${p.stage ? `<span>${esc(P.PSTAGE[p.stage] || p.stage)}</span>` : ''}${dl}`,
     });
     const tabs = `<div class="tabs" role="tablist" aria-label="Lead sections">${TABS.map(([k, t]) => `<button class="tab" role="tab" id="lt_${k}" aria-controls="lp_body" aria-selected="${tab === k}" data-act="leadTab" data-tab="${k}">${esc(t)}${counts[k] ? ` <span class="n">${counts[k]}</span>` : ''}</button>`).join('')}</div>`;
     const body = { overview, activity, contacts, project, source }[tab](o);
     P.drawer.set(`<div class="dw-head">${head}${ownbar(o)}${tabs}</div><div class="dw-body" id="lp_body" role="tabpanel" aria-labelledby="lt_${tab}">${alerts(o)}${body}</div>`, { keepScroll });
     P.state.log = { kind: 'call', outcome: null };
-    if (tab === 'project' && o.project?.id) { const el = document.getElementById('pp_people'); if (el) P.peopleSection(o.project.id, el); }
+    if (tab === 'project' && o.project?.id) {
+      const el = document.getElementById('pp_people'); if (el) P.peopleSection(o.project.id, el);
+      const tl = document.getElementById('pp_timeline'); if (tl) timeline(o.project.id, tl);
+    }
   }
   P.act.leadTab = (el) => { P.state.leadTab = el.dataset.tab; render(); document.getElementById('lt_' + el.dataset.tab)?.focus(); };
   P.act.logTab = () => { P.state.leadTab = 'activity'; render(); setTimeout(() => document.getElementById('lg_body')?.focus(), 30); };
@@ -151,16 +154,60 @@
         ${inferred.length ? `<div class="callout dash"><b>Inferred from the project type</b> (not stated in the source):<ul class="evidence">${inferred.map(evRow).join('')}</ul></div>` : ''}
         ${!ev.length && (p.scope_evidence || []).length ? `<div class="callout"><b>The source describes:</b> ${esc(p.scope_evidence.join(', '))}. This is project scope, not a request for Speedy pricing.</div>` : ''}
         ${o.speedy_scope ? `<div class="callout dash"><b>Our read (inferred):</b> ${esc(o.speedy_scope)}</div>` : ''}</div>` : ''}
-      <div class="panel"><h3>Why it is ${esc(o.priority || 'ranked')}</h3>
-        ${r.summary ? `<p class="small">${esc(r.summary)}.</p>` : ''}
-        <div class="factor"><span>Fit with Speedy's work</span><b>${o.fit_score ?? '?'}/100</b><div class="scorebar"><i style="width:${o.fit_score || 0}%"></i></div></div>
-        <div class="factor"><span>Urgency</span><b>${o.urgency_score ?? '?'}/100</b><div class="scorebar"><i style="width:${o.urgency_score || 0}%;background:var(--hot)"></i></div></div>
-        ${(r.fit || []).length || (r.urgency || []).length ? `<details class="plain"><summary>How the score is made</summary><div style="margin-top:10px">
-          ${(r.fit || []).map(x => `<div class="factor"><span>${esc(x.factor)}: ${esc(x.text)}</span><b>${x.points}/${x.max}</b></div>`).join('')}
-          ${(r.urgency || []).map(x => `<p class="small">${esc(x.text)}</p>`).join('')}
-          <p class="small muted">Fit and urgency are scored separately; a close deadline alone does not make a lead Hot.${o.legacy_priority ? ` The original pipeline ranked this ${esc(o.legacy_priority)}.` : ''}</p></div></details>` : ''}</div>
+      <div class="panel"><h3>Lead score ${ui.cls({ lead_class: o.lead_class || r.lead_class, lead_score: o.lead_score ?? r.lead_score, priority: o.priority })}<span class="tools"><button class="btn sm" data-act="callPrep">${P.icon('phone', 'sm')}Call prep</button></span></h3>
+        ${r.summary ? `<p class="small">${esc(r.summary)}</p>` : ''}
+        ${r.research ? `<div class="callout dash"><b>Research task:</b> ${esc(r.research)}</div>` : ''}
+        ${(r.fit || []).length ? `<div class="score-factors">${(r.fit || []).map(x => `<div class="factor"><span>${esc(x.factor)}<span class="sub">${esc(x.text || '')}</span></span><b>${x.points}/${x.max}</b><div class="scorebar"><i style="width:${Math.round(100 * (x.points || 0) / (x.max || 1))}%"></i></div></div>`).join('')}</div>
+          <p class="small muted">Hot needs strong direct evidence, actionable timing and someone to call; project size alone never makes a lead Hot.${r.office ? ` Served from the ${esc(r.office)} office.` : ''}${o.legacy_priority ? ` The original pipeline ranked this ${esc(o.legacy_priority)}.` : ''}</p>` : ''}</div>
       ${others ? coordination(o) : ''}`;
   }
+  // one project, every record and change in order: planning, permit, bid, low bidder, award, merges
+  async function timeline(pid, el) {
+    try {
+      const ev = await P.rpc('project_timeline', { p_project: pid });
+      if (!ev.length) { el.innerHTML = ''; return; }
+      el.innerHTML = `<div class="panel"><h3>Timeline</h3><ol class="ptimeline">${ev.map(e => `<li class="${e.future ? 'future' : ''}"><span class="when">${esc(P.date(e.at))}${e.estimated ? ' <span class="faint">(found)</span>' : ''}</span>
+        <span class="what">${esc(e.text)}${e.url ? ` <a href="${P.url(e.url)}" target="_blank" rel="noopener" aria-label="Open the record">${P.icon('ext', 'sm')}</a>` : ''}</span></li>`).join('')}</ol></div>`;
+    } catch { el.innerHTML = ''; }
+  }
+
+  // Everything needed for a first call, as plain text to read or paste into an email draft (nothing is sent)
+  P.act.callPrep = async () => {
+    const o = cur; if (!o) return;
+    const p = o.project || {}, r = o.priority_reasons || {}, c0 = o.company;
+    const best = (o.contacts || []).filter(c => c.phone || c.email).sort((a, b) => (b.verified - a.verified))[0];
+    const ev = (p.evidence || []).filter(e => e.confidence === 'documented').map(e => `${e.term}${e.doc ? ` (${e.doc}${e.page ? ', p. ' + e.page : ''})` : ''}`);
+    const svc = (o.services_confirmed?.length ? o.services_confirmed : o.services || []).slice(0, 5);
+    const log = (o.company_contact_log || [])[0];
+    const lines = [
+      `${o.ref} · ${c0?.name || p.owner_name || o.title}`,
+      `Project: ${p.title || o.title}${p.location_text || p.city ? ` (${p.location_text || [p.city, p.county && p.county + ' County'].filter(Boolean).join(', ')})` : ''}`,
+      `Stage: ${P.PSTAGE[p.stage] || p.stage || 'unknown'}${p.status_text ? ' · ' + p.status_text : ''}`,
+      p.winner_name ? `${p.winner_status === 'low_bidder' ? 'Apparent low bidder' : 'Awarded to'}: ${p.winner_name}${p.winner_amount ? ' (' + P.money(p.winner_amount) + ')' : ''}` : null,
+      p.deadline ? `Deadline: ${P.deadline(p)}` : null,
+      `Score: ${r.summary || o.lead_class || ''}`,
+      ev.length ? `Documented scope: ${ev.join('; ')}` : `Scope: inferred, not stated in the source${o.speedy_scope ? ` (${o.speedy_scope})` : ''}`,
+      svc.length ? `Speedy services to raise: ${svc.join(', ')}` : null,
+      best ? `Call: ${[best.name, best.title, best.phone, best.email].filter(Boolean).join(', ')}${best.verified ? ' (verified ' + P.date(best.verified_at) + ')' : ' (not yet verified)'}` : `Call: no contact yet. ${r.research || 'Find the estimator or project manager first.'}`,
+      log ? `Last contact with this company: ${P.date(log.at)}, ${log.user_name || 'a teammate'} on ${log.ref || 'another lead'}` : 'No one at Speedy has contacted this company yet.',
+      '',
+      'Talking points:',
+      p.winner_name ? `- Congratulate them on ${p.title || 'the project'} and ask who is buying out concrete cutting, coring and demolition.` : `- Ask who is building ${p.title || 'the project'} and when trades are being bought out.`,
+      ev.length ? `- The bid documents call for ${ev.slice(0, 2).join(' and ')}; offer pricing and a site visit.` : `- Ask whether the work includes slab or wall openings, coring for MEP, or concrete removal.`,
+      '- Offer GPR scanning before any cutting or coring.',
+      '- Speedy Concrete Cutting: offices in Orlando, Tampa, Fort Lauderdale and Jacksonville.',
+      p.source_url ? `Source: ${p.source_url}` : null,
+    ].filter(x => x != null).join('\n');
+    await P.dialog({ title: 'Call prep', wide: true, ok: 'Copy', cancel: 'Close',
+      body: `<p class="small muted">Built only from this lead's records. Check anything marked inferred during the call.</p><textarea class="prep" readonly rows="16" aria-label="Call prep summary">${esc(lines)}</textarea>`,
+      onOk: async () => { await P.copy(lines); P.toast('Copied.'); return true; } });
+  };
+  P.copy = async (text) => {
+    try { await navigator.clipboard.writeText(text); return true; }
+    catch { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); } finally { t.remove(); } return true; }
+  };
+  P.act.copyText = async (el) => { await P.copy(el.dataset.text || ''); P.toast('Copied.'); };
+
   function coordination(o) {
     const co = o.company_opps || [], pj = o.project_opps || [], log = o.company_contact_log || [];
     const line = (x) => `<div class="mini" data-lead="${x.id}" style="padding-left:0;padding-right:0"><div class="t"><a class="ell" href="#/lead/${x.id}" data-lead="${x.id}">${esc(x.ref)} · ${esc(x.company_name || x.project_title || x.title)}</a></div>
@@ -236,6 +283,7 @@
           ${c.phone ? `<div>${esc(c.phone)}</div>` : ''}${c.email ? `<div class="small">${esc(c.email)}</div>` : ''}${c.web && !c.phone && !c.email ? `<div class="small">${esc(c.web)}</div>` : ''}
           <div class="small ${c.verified ? '' : 'faint'}" style="margin-top:2px">${c.verified ? `${P.icon('check', 'sm')} Verified by ${esc(c.verified_by_name || 'the team')} ${esc(P.date(c.verified_at))}` : c.source === 'salesperson' ? 'Added by the team, not verified' : 'From research, not confirmed by a call'}</div></div>
         <div class="acts">${c.phone ? `<a class="btn sm primary" href="${P.tel(c.phone)}">${P.icon('phone', 'sm')}Call</a>` : ''}${c.email ? `<a class="btn sm" href="mailto:${esc(c.email)}">${P.icon('mail', 'sm')}Email</a>` : ''}
+          <button class="btn sm ghost" data-act="copyText" data-text="${esc([c.name, c.title, c0?.name, c.phone, c.email].filter(Boolean).join(', '))}" aria-label="Copy contact details">Copy</button>
           ${canEdit ? `<button class="btn sm ghost" data-act="editContact" data-id="${c.id}">Edit</button>` : ''}</div></div>`).join('');
     const pocs = (o.project?.pocs || []).filter(c => c.name || c.email || c.phone || c.web).map(c => `<div class="contact"><div class="who"><b>${esc(c.name || 'Agency contact')}</b>${c.title ? ` <span class="small muted">${esc(c.title)}</span>` : ''}
         ${c.phone ? `<div>${esc(c.phone)}</div>` : ''}${c.email ? `<div class="small">${esc(c.email)}</div>` : ''}${c.web ? `<div class="small"><a href="${P.url(c.web)}" target="_blank" rel="noopener">${esc(c.web.replace(/^https?:\/\//, '').slice(0, 60))}</a></div>` : ''}<div class="small faint">From the notice</div></div>
@@ -253,7 +301,7 @@
     const p = o.project;
     if (!p) return '<p class="muted">No project record is linked to this lead.</p>';
     const bidders = (p.bidders || []).length > 1 ? `<details class="plain" style="margin-top:8px"><summary>All ${p.bidders.length} bidders</summary><ol class="small" style="margin:8px 0 0;padding-left:20px">${p.bidders.map(b => `<li>${esc(b.name)}${b.amount ? ' · ' + esc(P.money(b.amount)) : ''}</li>`).join('')}</ol></details>` : '';
-    return `<div id="pp_people"></div><div class="panel"><h3>Project details</h3><dl class="facts">
+    return `<div id="pp_timeline"></div><div id="pp_people"></div><div class="panel"><h3>Project details</h3><dl class="facts">
         <dt>Project</dt><dd>${esc(p.title)}</dd>
         <dt>Owner or agency</dt><dd>${p.owner_name ? esc(p.owner_name) : P.unknown()}${p.level ? `<div class="sub">${esc(p.level)}</div>` : ''}</dd>
         <dt>Location</dt><dd>${esc(p.location_text || '')}${p.location_text ? '<br>' : ''}<span class="sub">${esc(P.place(p))}</span></dd>

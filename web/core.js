@@ -40,7 +40,7 @@
     ['requested_info', 'Requested information'], ['interested', 'Interested'], ['quote_requested', 'Quote requested'], ['not_interested', 'Not interested'], ['wrong_contact', 'Wrong contact']];
   P.OUTCOME_LABEL = Object.fromEntries(P.OUTCOMES.concat([['reached', 'Spoke with them'], ['wrong_number', 'Wrong contact'], ['sent_info', 'Sent info'], ['meeting_set', 'Meeting set']]));
   P.QUOTE_STATUS = { requested: 'Requested', in_progress: 'Being priced', sent: 'Sent', accepted: 'Accepted', declined: 'Declined', no_response: 'No response yet' };
-  P.ACTIVE = ['claimed', 'contacted', 'qualified', 'quote_needed', 'quote_sent', 'follow_up'];
+  P.ACTIVE = ['claimed', 'researching', 'contacted', 'qualified', 'quote_needed', 'quote_sent', 'follow_up'];
   P.CLOSED = ['won', 'lost', 'disqualified', 'archived'];
   P.WINNER_STAGES = ['low_bidder', 'intent_to_award', 'awarded', 'preconstruction', 'under_construction'];
 
@@ -136,6 +136,7 @@
     swap: '<path d="M7 4 3 8l4 4M3 8h13M17 12l4 4-4 4M21 16H8"/>',
     dollar: '<path d="M12 3v18M16.5 7.5c-.8-1.3-2.5-2-4.5-2-2.5 0-4.5 1.3-4.5 3.2 0 4.3 9 2.4 9 6.6 0 1.9-2 3.2-4.5 3.2-2.1 0-3.9-.8-4.7-2.2"/>',
     flag: '<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>',
+    saw: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/><path d="M12 4v3M12 17v3M4 12h3M17 12h3"/>',
     signal: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
   };
   P.prioTag = (p) => p ? `<span class="tag ${p.toLowerCase()}">${esc(p)}</span>` : '';   // print view
@@ -144,6 +145,8 @@
   // ---------------------------------------------------------------- small UI pieces
   P.ui = {
     prio: (p, always) => !p || (p === 'Later' && !always) ? '' : `<span class="badge ${p.toLowerCase()}"><i></i>${esc(p)}</span>`,
+    // lead class and 0-100 score; the explanation is on the lead
+    cls: (r) => !r.lead_class ? P.ui.prio(r.priority) : `<span class="badge cls-${r.lead_class.toLowerCase().replace(/ /g, '-')}" title="${esc(r.priority_summary || '')}"><i></i>${esc(r.lead_class)}${r.lead_score != null ? ` <b>${r.lead_score}</b>` : ''}</span>`,
     stage: (k) => {
       const cls = k === 'available' ? 'accent' : ['quote_needed', 'quote_sent'].includes(k) ? 'accent' : k === 'won' ? 'ok' : ['lost', 'disqualified', 'archived', 'nurture'].includes(k) ? 'later' : 'outline';
       return `<span class="badge ${cls}">${esc(k === 'available' ? 'Unclaimed' : P.stageLabel(k))}</span>`;
@@ -434,7 +437,7 @@
     const mgr = P.isMgr();
     return [
       ['Daily work', [['today', 'Today', 'today']]],
-      ['Opportunities', [['pool', 'Available', 'pool'], ['mine', 'My pipeline', 'mine'], ['signals', 'Early signals', 'signal'], mgr && ['all', 'All leads', 'all']]],
+      ['Opportunities', [['pool', 'Available', 'pool'], ['mine', 'My pipeline', 'mine'], ['signals', 'Early signals', 'signal'], ['companies', 'Companies', 'building'], mgr && ['all', 'All leads', 'all']]],
       ['Government', [['gov', 'Gov contracts', 'gov']]],
       mgr && ['Management', [['team', 'Team', 'team'], ['users', 'People and access', 'users']]],
       mgr && ['Data and system', [['sources', 'Sources and refreshes', 'sources']]],
@@ -442,7 +445,7 @@
     ].filter(Boolean).map(([g, items]) => [g, items.filter(Boolean)]);
   };
   P.TITLES = { today: 'Today', pool: 'Available', mine: 'My pipeline', all: 'All leads', gov: 'Gov contracts', team: 'Team', users: 'People and access',
-    sources: 'Sources and refreshes', signals: 'Early signals', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
+    sources: 'Sources and refreshes', signals: 'Early signals', companies: 'Companies', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
   P.renderShell = () => {
     const me = P.state.me, collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
     const link = ([k, label, icon]) => `<a class="sb-link" href="#/${k}" data-nav="${k}" title="${esc(label)}">${P.icon(icon)}<span class="txt">${esc(label)}</span><span class="sb-count" data-count="${k}"></span></a>`;
@@ -495,7 +498,7 @@
     const b = P.state.board || [], me = P.state.me?.id, today = P.todayET();
     const mine = b.filter(r => r.owner_id === me && P.ACTIVE.includes(r.stage));
     return {
-      pool: b.filter(r => r.stage === 'available' && !r.needs_review).length,
+      pool: b.filter(r => r.stage === 'available' && !r.needs_review && (['Hot', 'Warm'].includes(r.lead_class) || !r.lead_class)).length,
       mine: mine.length,
       due: mine.filter(r => r.next_action_due && r.next_action_due <= today).length,
       review: P.isMgr() ? b.filter(r => r.needs_review).length : 0,

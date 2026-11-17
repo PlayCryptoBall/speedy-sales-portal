@@ -677,3 +677,30 @@ tr.clickable { cursor: pointer; }
 .people .who { min-width: 0; overflow-wrap: anywhere; }
 .people .who .sub { display: block; }
 @media (max-width: 560px) { .people li { grid-template-columns: 1fr; gap: 2px; } }
+
+/* Lead classes and score */
+.badge.cls-hot { background: var(--hot-bg); color: var(--hot-ink); }
+.badge.cls-warm { background: var(--warm-bg); color: var(--warm-ink); }
+.badge.cls-early-signal { background: var(--hover); color: var(--ink-2); border: 1px dashed var(--line); }
+.badge.cls-needs-review { background: var(--hover); color: var(--ink-2); }
+.badge.cls-low-fit, .badge.cls-expired { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.badge[class*="cls-"] b { font-weight: 700; margin-left: 2px; }
+.badge.cls-expired { text-decoration: none; }
+.score-factors .factor { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; margin-bottom: 10px; }
+.score-factors .factor .sub { display: block; color: var(--muted); font-size: 12px; }
+.score-factors .scorebar { grid-column: 1 / -1; }
+.ptimeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); display: grid; gap: 10px; }
+.ptimeline li { position: relative; display: grid; grid-template-columns: 92px 1fr; gap: 10px; font-size: 13px; }
+.ptimeline li::before { content: ''; position: absolute; left: -20px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface, #fff); border: 2px solid var(--accent, #1f4fd1); }
+.ptimeline li.future::before { border-style: dashed; border-color: var(--muted); }
+.ptimeline .when { color: var(--muted); white-space: nowrap; }
+@media (max-width: 560px) { .ptimeline li { grid-template-columns: 1fr; gap: 0; } }
+textarea.prep { width: 100%; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.dup-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dup-side { padding: 10px; border: 1px solid var(--line); border-radius: var(--r-sm); min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .dup-pair { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .sig-filters { display: grid !important; grid-template-columns: 1fr 1fr; width: 100%; }
+  .sig-filters input[type=search] { grid-column: 1 / -1; min-width: 0 !important; }
+  .sig-filters select { min-width: 0; font-size: 14px; }
+}

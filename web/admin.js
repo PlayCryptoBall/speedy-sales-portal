@@ -64,7 +64,7 @@
       <div class="cols">
         <div class="stack">
           <section class="card card-pad"><div class="sec-head"><h2>Pipeline by stage <span class="n">${total} opportunities</span></h2></div>
-            <p class="sec-note">Each opportunity is counted once, by its current stage. "Available to claim" is the pool salespeople see; new finds waiting for a manager's review are counted separately.</p>
+            <p class="sec-note">Each opportunity is counted once, by its current stage. "Available to claim" is every unclaimed lead; the Available badge counts only Hot and Warm (ready to contact). New finds waiting for a manager's review are counted separately.</p>
             ${hbars(main, { href })}
             <details class="plain" style="margin-top:14px"><summary>Closed, parked and review (${sum(['lost', 'nurture', 'disqualified', 'archived', 'in_review'])})</summary><div style="margin-top:10px">${hbars(rest, { href, max: Math.max(1, ...main.map(m => m[1])) })}</div></details></section>
         </div>
@@ -113,7 +113,7 @@
         { n: t.stale_list.length, note: `Claimed leads with no logged activity for ${t.stale_days}+ days. Nothing is released automatically: check in, reassign, or release from the lead.` })}
       ${sec('Overdue follow-ups', F.overdue.length ? Object.entries(byOwner).sort((a, b) => b[1].length - a[1].length).map(([name, list]) => `<div class="card" style="margin-bottom:10px"><div class="sec-head" style="padding:10px 16px 0"><h2 style="font-size:14px">${esc(name)} <span class="n">${list.length}</span></h2></div>
           ${list.sort((a, b) => a.next_action_due.localeCompare(b.next_action_due)).map(r => mini(r, ui.due(r.next_action_due), r.next_action ? `Next: ${esc(r.next_action)}` : '')).join('')}</div>`).join('') : P.empty('No overdue follow-ups', '', '', 'sm card'), { n: F.overdue.length })}
-      ${sec('Hot leads nobody has claimed', hot.length ? `<div class="list">${hot.slice(0, 10).map(r => mini(r, `<button class="btn sm" data-act="assignRow" data-id="${r.id}">Assign</button>`, esc(P.place(r)))).join('')}${hot.length > 10 ? `<div class="showmore"><a class="btn" href="#/pool?priority=Hot">See all ${hot.length}</a></div>` : ''}</div>` : P.empty('No unclaimed Hot leads', '', '', 'sm card'), { n: hot.length })}
+      ${sec('Hot leads nobody has claimed', hot.length ? `<div class="list">${hot.slice(0, 10).map(r => mini(r, `<button class="btn sm" data-act="assignRow" data-id="${r.id}">Assign</button>`, esc(P.place(r)))).join('')}${hot.length > 10 ? `<div class="showmore"><a class="btn" href="#/pool?cls=Hot">See all ${hot.length}</a></div>` : ''}</div>` : P.empty('No unclaimed Hot leads', '', '', 'sm card'), { n: hot.length })}
       ${sec('Members with no activity this week', inactive.length ? `<div class="list">${inactive.map(p => `<div class="mini" data-person="${p.id}"><div class="t"><a href="#/team?person=${p.id}" data-person="${p.id}">${esc(p.name || p.email)}</a></div>
           <div class="s">${p.last_activity_at ? 'Last logged work ' + esc(P.ago(p.last_activity_at)) : 'Has not logged any work yet'} · ${P.plural(p.open, 'open lead')} · seen ${esc(p.last_seen_at ? P.ago(p.last_seen_at) : 'never')}</div><div class="r">${P.icon('right', 'sm')}</div></div>`).join('')}</div>` : P.empty('Everyone logged work this week', '', '', 'sm card'), { n: inactive.length })}`;
   }
@@ -212,7 +212,7 @@
 
   // ---------------------------------------------------------------- Sources and refreshes
   let pollTimer;
-  const SRC_TABS = [['overview', 'Overview'], ['coverage', 'Coverage'], ['review', 'Review queue'], ['missed', 'Missed check'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
+  const SRC_TABS = [['overview', 'Overview'], ['coverage', 'Coverage'], ['review', 'Review queue'], ['dups', 'Duplicates'], ['missed', 'Missed check'], ['runs', 'Refresh runs'], ['changes', 'Source changes'], ['settings', 'Settings']];
   P.views.sources = async (view, r) => {
     if (mgrOnly(view, 'Sources and refreshes')) return;
     P.setPage('Sources and refreshes');
@@ -223,8 +223,10 @@
     P.state.cleanup = () => clearTimeout(pollTimer);
   };
   async function loadSources(view) {
-    const [s, d] = await Promise.all([P.rpc('sources_status'), P.rpc('discovery_overview').catch(() => null)]);
-    s.discovery = d; P.state.sources = s;
+    const [s, d, cov, dups] = await Promise.all([P.rpc('sources_status'), P.rpc('discovery_overview').catch(() => null),
+      P.rpc('coverage_status').catch(() => null), P.rpc('duplicate_candidates').catch(() => [])]);
+    s.discovery = d; s.coverage = cov; s.dups = dups || []; P.state.sources = s;
+    s.health = Object.fromEntries(((cov && cov.sources) || []).map(h => [h.id, h]));
     if ((P.state.srcTab || 'overview') === 'settings') P.state.terms = await P.rpc('service_terms_list');
     if (P.state.page !== 'sources') return;
     renderSources(view);
@@ -241,15 +243,18 @@
   function renderSources(view) {
     const s = P.state.sources, tab = P.state.srcTab || 'overview';
     const running = s.runs.some(r => r.status === 'running');
-    const body = { overview: srcOverview, coverage: srcCoverage, review: srcReview, missed: srcMissed, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
+    const body = { overview: srcOverview, coverage: srcCoverage, review: srcReview, dups: srcDups, missed: srcMissed, runs: srcRuns, changes: srcChanges, settings: srcSettings }[tab](s);
     view.innerHTML = `${P.pageHead({ title: 'Sources and refreshes', sub: 'Where leads come from, when they were last checked, and what changed.',
         actions: `<button class="btn" data-act="runUpkeep">Run daily upkeep</button><button class="btn primary" data-act="runRefresh" data-source="all">${P.icon('refresh')}Refresh all now</button>` })}
       ${running ? `<div class="alert info">${P.icon('refresh')}<div class="grow">A refresh is running. This page updates every 10 seconds.</div></div>` : ''}
-      ${tabsHtml('srcTab', tab, SRC_TABS.map(([k, l]) => [k, l, k === 'review' ? s.review.length : null]))}${body}`;
+      ${tabsHtml('srcTab', tab, SRC_TABS.map(([k, l]) => [k, l, k === 'review' ? s.review.length : k === 'dups' ? s.dups.length : null]))}${body}`;
   }
   // Five states that are never confused: working (with or without new records), failed, not checked recently,
   // needs a login or subscription, and configured but never successful.
+  const HCLS = { Healthy: 'ok', Degraded: 'warn', Stale: 'warn', Failed: 'fail' };
   const statusOf = (x) => {
+    const h = P.state.sources?.health?.[x.id];
+    if (h) return `<span class="status ${HCLS[h.status] || ''}" title="${esc(h.why || '')}"><span class="dot ${{ ok: 'ok', warn: 'warm', fail: 'danger' }[HCLS[h.status]] || ''}"></span>${esc(h.status)}</span>`;
     if (x.kind === 'paid') return '<span class="status"><span class="dot"></span>Needs a paid subscription</span>';
     if (x.kind === 'needs_credentials') return '<span class="status"><span class="dot"></span>Needs logins (not collected)</span>';
     if (x.kind !== 'automated') return `<span class="status"><span class="dot"></span>${esc({ legacy: 'One-time import', manual: 'Not automated: added by hand' }[x.kind] || 'Not automated')}</span>`;
@@ -273,7 +278,8 @@
       ${sec('Sources', `<div class="card">${s.sources.map(x => `<div class="srcrow">
           <div class="name">${esc(x.name)} ${statusOf(x)}</div>
           <div class="small muted">${esc(x.coverage)}</div>
-          <div class="small" style="color:var(--ink-2)">${esc(x.schedule_note)}${x.last_success_at ? ` · Last success ${esc(P.ago(x.last_success_at))}` : ''}${x.last_run_at && x.last_status !== 'success' ? ` · Last run ${esc(P.ago(x.last_run_at))}` : ''}</div>
+          <div class="small" style="color:var(--ink-2)">${esc(x.schedule_note)}${x.last_run_at ? ` · Last attempt ${esc(P.ago(x.last_run_at))}` : ''}${x.last_success_at ? ` · Last success ${esc(P.ago(x.last_success_at))}` : ''}${s.health?.[x.id]?.last_new ? ` · Last new record ${esc(P.ago(s.health[x.id].last_new))}` : x.kind === 'automated' ? ' · No new records yet' : ''}</div>
+          ${s.health?.[x.id]?.why && s.health[x.id].status !== 'Healthy' ? `<div class="small" style="color:var(--warn-ink, var(--warm-ink))">${esc(s.health[x.id].why)}</div>` : ''}
           ${x.last_error && x.last_status !== 'success' ? `<div class="small" style="color:var(--danger)">${esc(String(x.last_error).slice(0, 200))}</div>` : ''}
           ${srcStats(x, s.discovery)}
           ${x.access_notes ? `<details class="plain"><summary>Access notes</summary><p class="small muted" style="margin-top:6px">${esc(x.access_notes)}</p></details>` : ''}
@@ -298,13 +304,43 @@
         ${cell(m.duplicates_open, 'Possible duplicates', m.duplicates_open > 0)}${cell(`${m.sources_ok}/${m.sources_automated}`, 'Automated sources OK')}${cell(m.sources_errors, 'Sources with errors', m.sources_errors > 0)}${cell(m.sources_stale, 'Stale (no success in 3 days)', m.sources_stale > 0)}
       </div>`, { note: 'Counts come from refresh runs that actually executed. A source counts as working only after it retrieved and processed records.' });
   }
+  function registryHtml(cov) {
+    if (!cov) return '';
+    const TYPE = { permits: 'Permits', planning: 'Planning and zoning', procurement: 'Bids', awards: 'Awards', property: 'Property sales', roads: 'Roads and bridges', federal: 'Federal bids', companies: 'Company records', records: 'Official records' };
+    const chip = (st) => `<span class="status ${HCLS[st] || ''}"><span class="dot ${{ ok: 'ok', warn: 'warm', fail: 'danger' }[HCLS[st]] || ''}"></span>${esc(st || 'Unknown')}</span>`;
+    return `${sec('Jurisdiction registry', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Jurisdiction</th><th scope="col">Data</th><th scope="col">Status</th><th scope="col">Method</th><th scope="col">Scope and limits</th></tr></thead><tbody>
+        ${cov.registry.map(r => `<tr><td><b class="strong">${esc(r.jurisdiction)}</b><div class="sub">${esc(r.county ? r.county + ' County' : 'Statewide')}</div></td><td>${esc(TYPE[r.data_type] || r.data_type)}</td>
+          <td>${chip(r.status)}${r.why ? `<div class="sub">${esc(r.why)}</div>` : ''}</td><td class="small">${esc(r.method || '')}${r.url ? `<div class="sub"><a href="${P.url(r.url)}" target="_blank" rel="noopener">Official site</a></div>` : ''}</td>
+          <td class="small">${esc(r.scope || '')}${r.restrictions ? `<div class="sub">${esc(r.restrictions)}</div>` : ''}</td></tr>`).join('')}</tbody></table></div>`,
+        { note: 'Statuses: Healthy, Degraded, Stale, Failed (live collectors); Requires manual acquisition; Not yet integrated. One source in a county does not mean every permit or public project there is covered.' })}
+      ${(cov.next || []).length ? sec('Next integrations by business value', `<ol class="small" style="margin:0;padding-left:20px">${cov.next.slice(0, 8).map(n => `<li><b>${esc(n.jurisdiction)}</b>: ${esc(n.scope || '')}</li>`).join('')}</ol>`,
+        { note: 'Ranked by market size and Speedy office territory (Orlando, Tampa, Fort Lauderdale, Jacksonville).' }) : ''}`;
+  }
+  function srcDups(s) {
+    const side = (x) => `<div class="dup-side"><b class="strong">${esc(x.title)}</b><div class="small muted">${esc(x.source_name || '')}${x.solicitation_no ? ' · ' + esc(x.solicitation_no) : ''}${x.date ? ' · ' + esc(P.date(x.date)) : ''}${x.county ? ' · ' + esc(x.county) + ' County' : ''}</div>
+      <div class="small">${esc(P.PSTAGE[x.stage] || x.stage || '')}${x.winner_name ? ' · ' + esc(x.winner_name) : ''}</div>
+      <div class="small">${(x.opps || []).map(o => `<a href="#/lead/${o.id}" data-lead="${o.id}">${esc(o.ref)}</a> ${esc(o.owner || 'unclaimed')}`).join(', ')}${x.source_url ? ` · <a href="${P.url(x.source_url)}" target="_blank" rel="noopener">Source</a>` : ''}</div></div>`;
+    return s.dups.length ? sec('Possible duplicates', `<div class="stack">${s.dups.map((d, i) => `<div class="card card-pad"><div class="small muted" style="margin-bottom:8px">${esc(d.reason)}</div>
+        <div class="dup-pair">${side(d.a)}${side(d.b)}</div>
+        <div class="row" style="gap:8px;margin-top:10px"><button class="btn sm" data-act="dupMerge" data-keep="${d.a.id}" data-drop="${d.b.id}">Same project: keep the first</button>
+          <button class="btn sm" data-act="dupMerge" data-keep="${d.b.id}" data-drop="${d.a.id}">Same project: keep the second</button>
+          <button class="btn sm ghost" data-act="dupSeparate" data-a="${d.a.id}" data-b="${d.b.id}">Different projects</button></div></div>`).join('')}</div>`,
+      { note: 'Suggested only when records share a solicitation number, the same contractor with a similar description within 6 months, or a near-identical title in the same county. Merging keeps both sources\' identifiers and history; a lead someone is working is never closed.' })
+      : P.empty('No possible duplicates', 'Records that look like the same project from different sources show up here for a decision.');
+  }
+  P.act.dupMerge = (el) => P.busy(el, async () => {
+    await P.rpc('merge_projects', { p_keep: el.dataset.keep, p_drop: el.dataset.drop }); P.invalidate?.(); P.toast('Merged.'); await loadSources(document.getElementById('view'));
+  });
+  P.act.dupSeparate = (el) => P.busy(el, async () => {
+    await P.rpc('separate_projects', { p_a: el.dataset.a, p_b: el.dataset.b }); P.toast('Kept separate.'); await loadSources(document.getElementById('view'));
+  });
   function srcCoverage(s) {
     const d = s.discovery || {}, f = P.state.covRegion || '', gaps = !!P.state.covGaps;
     const counties = (d.counties || []).filter(c => (!f || c.region === f) && (!gaps || (!c.found_90d && !c.local_sources.length)));
     const regions = d.regions || [];
     const statewide = (d.sources || []).filter(x => x.kind === 'automated' && !/City|county/i.test(x.geography || ''));
     const yes = '<span class="status ok"><span class="dot ok"></span>';
-    return `${sec('What each source covers', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Source</th><th scope="col">Area</th><th scope="col">What it finds</th><th scope="col">How</th>
+    return `${registryHtml(s.coverage)}${sec('What each source covers', `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Source</th><th scope="col">Area</th><th scope="col">What it finds</th><th scope="col">How</th>
         <th scope="col">Last tried</th><th scope="col">Last success</th><th class="num" scope="col">Examined</th><th class="num" scope="col">Relevant, 30 days</th><th scope="col">Status and limits</th></tr></thead><tbody>
         ${(d.sources || []).map(x => `<tr><td><b class="strong">${esc(x.name)}</b>${x.url ? `<div class="sub"><a href="${P.url(x.url)}" target="_blank" rel="noopener">Open</a></div>` : ''}</td>
           <td>${esc(x.geography || '')}</td><td class="small">${esc(x.project_types || '')}</td><td class="small">${esc(x.method || '')}</td>
@@ -611,7 +647,8 @@
     if (!P.isMgr()) { view.innerHTML = P.pageHead({ title: 'Team report' }) + P.empty('Managers only', 'Ask a manager for team numbers.'); return; }
     const f = P.state.repF ||= { from: P.addDays(-30), to: P.todayET(), user_id: '', region: '', source_id: '' };
     view.innerHTML = P.pageHead({ title: 'Team report' }) + P.skeleton(6);
-    const [r, t, src] = await Promise.all([P.rpc('team_report', { p: f }), P.state.team || P.rpc('team_overview'), P.state.sources || P.rpc('sources_status')]);
+    const [r, t, src, oc] = await Promise.all([P.rpc('team_report', { p: f }), P.state.team || P.rpc('team_overview'), P.state.sources || P.rpc('sources_status'),
+      P.rpc('outcome_report', { p: { from: f.from, to: f.to } }).catch(() => null)]);
     P.state.team = t;
     if (P.state.page !== 'reports') return;
     const tot = r.totals || {};
@@ -634,6 +671,18 @@
       ${sec('Results', `<div class="metricgrid wide4">${[['Quotes requested', tot.quotes_requested], ['Quotes sent', tot.quotes_sent], ['Won', tot.won], ['Lost', tot.lost]]
         .map(([l, v]) => `<div><div class="lbl">${l}</div><div class="val">${v ?? 0}</div></div>`).join('')}</div>`,
         { note: tot.win_rate != null ? `Win rate ${tot.win_rate}% of leads closed in this period.` : 'Win rate shows once at least 5 leads have been won or lost in the period.' })}
+      ${oc ? sec('Pipeline value', `<div class="metricgrid wide4">${[['Qualified leads found', oc.qualified_discovered, `${oc.per_day} a day (Hot and Warm)`],
+          ['Median time to first contact', oc.median_hours_to_first_contact != null ? (oc.median_hours_to_first_contact < 48 ? oc.median_hours_to_first_contact + ' h' : Math.round(oc.median_hours_to_first_contact / 24) + ' days') : '—', 'From discovery to the first call, email or visit'],
+          ['Quoted value', oc.quoted_value ? P.money(oc.quoted_value) : '$0', `${oc.quotes_sent} quotes sent`], ['Won value', oc.won_value ? P.money(oc.won_value) : '$0', `${oc.won} won`],
+          ['Lead to quote', oc.contacted ? Math.round(100 * oc.quotes_sent / Math.max(oc.contacted, 1)) + '%' : '—', 'Of leads contacted'], ['Quote to win', oc.quotes_sent >= 5 ? Math.round(100 * oc.won / oc.quotes_sent) + '%' : '—', oc.quotes_sent >= 5 ? '' : 'Shows after 5 quotes'],
+          ['Expired before anyone called', oc.stale_before_contact, 'Found but never worked'], ['Leads contacted', oc.contacted, 'At least one call, email or visit']]
+        .map(([l, v, sub]) => `<div><div class="lbl">${l}</div><div class="val">${v ?? 0}</div><div class="sub small muted">${esc(sub || '')}</div></div>`).join('')}</div>
+        ${(oc.by_source || []).length ? `<div class="tablewrap" style="margin-top:14px"><table class="tbl"><thead><tr><th scope="col">Data source</th><th class="num" scope="col">Leads</th><th class="num" scope="col">Hot or Warm</th><th class="num" scope="col">Contacted</th><th class="num" scope="col">Quotes</th><th class="num" scope="col">Won</th></tr></thead><tbody>
+          ${oc.by_source.map(x => `<tr><td>${esc(x.source)}</td><td class="num">${x.leads}</td><td class="num">${x.qualified}</td><td class="num">${x.contacted}</td><td class="num">${x.quotes}</td><td class="num">${x.won}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${(oc.by_county || []).length ? `<details class="plain" style="margin-top:10px"><summary>By county</summary><div class="tablewrap" style="margin-top:8px"><table class="tbl compact"><thead><tr><th scope="col">County</th><th class="num" scope="col">Leads</th><th class="num" scope="col">Hot or Warm</th><th class="num" scope="col">Won</th></tr></thead><tbody>
+          ${oc.by_county.map(x => `<tr><td>${esc(x.county)}</td><td class="num">${x.leads}</td><td class="num">${x.qualified}</td><td class="num">${x.won}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+        ${(oc.top_contractors || []).filter(x => x.quotes || x.won).length ? `<details class="plain"><summary>Most productive contractors</summary><ol class="small" style="margin:8px 0 0;padding-left:20px">${oc.top_contractors.filter(x => x.quotes || x.won).map(x => `<li>${esc(x.company)}: ${x.quotes} quotes, ${x.won} won</li>`).join('')}</ol></details>` : ''}`,
+        { note: `Observed numbers only. ${esc(oc.note)} Source quality is judged by contacts, quotes and wins, not by how many records a source scraped.` }) : ''}
       ${sec('By person', people.length ? `<div class="tablewrap"><table class="tbl"><thead><tr><th scope="col">Person</th>${col('', 'Claimed')}${col('', 'Contacts')}<th scope="col"><span class="sr">Contacts bar</span></th>${col('', 'Conversations')}${col('', 'Quotes req.')}${col('', 'Quotes sent')}${col('', 'Won')}${col('', 'Lost')}${col('', 'Active now')}${col('', 'Overdue now')}${col('', 'Inactive now')}</tr></thead><tbody>
         ${people.map(p => `<tr data-person="${p.id}" class="clickable"><td><a href="#/reports?person=${p.id}" data-person="${p.id}">${esc(p.full_name || 'Unknown')}</a></td><td class="num">${p.claimed}</td><td class="num">${p.attempts}</td><td>${bar(p.attempts, maxA)}</td><td class="num">${p.conversations}</td>
           <td class="num">${p.quotes_requested}</td><td class="num">${p.quotes_sent}</td><td class="num">${p.won}</td><td class="num">${p.lost}</td><td class="num">${p.active_now}</td><td class="num ${p.overdue_now ? 'due-hot' : ''}">${p.overdue_now}</td><td class="num ${p.inactive_now ? 'due-hot' : ''}">${p.inactive_now}</td></tr>`).join('')}

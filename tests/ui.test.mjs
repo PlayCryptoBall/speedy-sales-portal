@@ -69,7 +69,7 @@ await t('Phone: Available list loads 30 at a time, searches, and pages', async (
   await flip.goto(BASE + '#/pool');
   await flip.locator('.li').first().waitFor({ timeout: 15000 });
   total = Number((await flip.locator('#lv-bar').textContent()).match(/(\d+) leads/)[1]);
-  assert.ok(total > 100, 'pool has the imported leads: ' + total);
+  assert.ok(total > 30, 'the Ready to contact tab has more than one page: ' + total);
   assert.equal(await flip.locator('.li').count(), 30, 'first page of 30');
   const nav = Number(await flip.locator('[data-count="pool"]').first().textContent().catch(() => '0')) || total;
   assert.equal(nav, total, 'nav count matches the list');
@@ -88,20 +88,21 @@ await t('Phone: Available list loads 30 at a time, searches, and pages', async (
 
 await t('Phone: filters open as a sheet and show as removable chips', async () => {
   await flip.locator('#lv-fbtn').click();
-  await flip.locator('.pop.sheet [data-f="priority"]').selectOption('Hot');
+  await flip.locator('.pop.sheet [data-f="cls"]').selectOption('Warm');
   await flip.getByRole('button', { name: 'Done' }).click();
   await flip.locator('.fchip').first().waitFor();
-  assert.match(await flip.locator('#lv-chips').textContent(), /Priority: Hot/);
-  const hot = await flip.locator('.li').count();
-  assert.ok(hot > 0 && hot <= 30);
-  assert.equal(await flip.locator('.li .badge.warm').count(), 0, 'only Hot leads remain');
+  assert.match(await flip.locator('#lv-chips').textContent(), /Lead class: Warm/);
+  const warm = await flip.locator('.li').count();
+  assert.ok(warm > 0 && warm <= 30);
+  assert.equal(await flip.locator('.li .badge[class*="cls-"]:not(.cls-warm)').count(), 0, 'only Warm leads remain');
+  assert.match(await flip.locator('.li .badge.cls-warm').first().textContent(), /Warm \d+/, 'class shows with its score');
   await flip.locator('.fchip').first().click();
   await flip.locator('#lv-chips.hidden').waitFor({ state: 'attached' });
 });
 
 await t('Phone: open a Hot lead, claim it, log a call with a follow-up', async () => {
-  const hot = (await db.query(`select o.id from opportunities o join projects p on p.id=o.project_id where o.stage='available' and o.priority='Hot' and not o.needs_review and o.company_id is not null
-     and exists (select 1 from contacts c where c.company_id=o.company_id and c.phone is not null) order by o.fit_score desc limit 1`)).rows[0];
+  const hot = (await db.query(`select o.id from opportunities o join projects p on p.id=o.project_id where o.stage='available' and o.lead_class in ('Hot','Warm') and not o.needs_review and o.company_id is not null
+     and exists (select 1 from contacts c where c.company_id=o.company_id and c.phone is not null) order by o.lead_score desc limit 1`)).rows[0];
   leadId = hot.id;
   await openLead(flip, leadId);
   await drawer(flip).getByRole('button', { name: 'Claim this lead' }).waitFor();
@@ -239,7 +240,8 @@ await t('Saved work shows on another device; Today shows priorities, deadlines a
   await flipDesk.waitForFunction(() => !document.querySelector('#scrim.on'));
   await flipDesk.goto(BASE + '#/today');
   await flipDesk.waitForTimeout(300);
-  await flipDesk.getByRole('heading', { name: /Hot leads/ }).first().waitFor();
+  await flipDesk.getByRole('heading', { name: 'Best 5 to contact' }).first().waitFor();
+  assert.ok(await flipDesk.locator('#sec-hot .mini').count() <= 5);
   const kpi = Number(await flipDesk.locator('a.kpi[href="#/mine"] .val').textContent());
   const nav = Number(await flipDesk.locator('.sidebar [data-count="mine"]').textContent());
   assert.equal(kpi, nav, 'active-lead card matches the nav count');
@@ -257,7 +259,10 @@ await t('Manager: Team numbers match the lists they describe', async () => {
   const bar = mgr.locator('.hbar', { hasText: 'Available to claim' }).first();
   const teamAvail = Number(await bar.locator('.v').textContent());
   const navAvail = Number(await mgr.locator('.sidebar [data-count="pool"]').textContent());
-  assert.equal(teamAvail, navAvail, `Team "Available to claim" (${teamAvail}) = Available list (${navAvail})`);
+  const dbAll = (await db.query(`select count(*)::int n from opportunities where stage='available' and not needs_review`)).rows[0].n;
+  const dbReady = (await db.query(`select count(*)::int n from opportunities where stage='available' and not needs_review and (lead_class in ('Hot','Warm') or lead_class is null)`)).rows[0].n;
+  assert.equal(teamAvail, dbAll, `Team "Available to claim" (${teamAvail}) counts every unclaimed lead (${dbAll})`);
+  assert.equal(navAvail, dbReady, `the Available badge (${navAvail}) counts leads ready to contact (${dbReady})`);
   const review = (await db.query(`select count(*)::int n from opportunities where stage='available' and needs_review`)).rows[0].n;
   await mgr.getByText(/Closed, parked and review/).click();
   assert.equal(Number(await mgr.locator('.hbar', { hasText: 'Waiting for review' }).locator('.v').textContent()), review);
@@ -447,9 +452,10 @@ await t('Early signals: a property sale shows with its buyer; tracking it opens 
   await card.waitFor({ timeout: 15000 });
   assert.match(await card.innerText(), /Land acquired[\s\S]*Buyer: Uitest Land Holdings LLC/);
   await shot(p, '18-phone-signals');
-  await card.getByRole('button', { name: 'Track' }).click();
+  await card.getByRole('button', { name: 'Track' }).click().catch(async (e) => { await shot(p, 'fail-track'); throw e; });
   await toast(p, /Tracked/);
-  await drawer(p).getByRole('tab', { name: 'Project' }).click();
+  await drawer(p).locator('#dw_title').waitFor({ timeout: 15000 }).catch(async (e) => { await shot(p, 'fail-drawer'); throw e; });
+  await drawer(p).getByRole('tab', { name: 'Project' }).click({ timeout: 10000 }).catch(async (e) => { await shot(p, 'fail-tab'); throw e; });
   await drawer(p).getByRole('heading', { name: 'People and companies' }).waitFor({ timeout: 15000 });
   assert.match(await drawer(p).locator('#pp_people').innerText(), /Buyer\s+Uitest Land Holdings LLC[\s\S]*Sunbiz/);
   await shot(p, '19-phone-signal-lead');

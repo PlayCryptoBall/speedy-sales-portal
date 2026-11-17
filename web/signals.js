@@ -36,7 +36,7 @@
   };
 
   // ---------------------------------------------------------------- page
-  const st = () => (P.state.sig = P.state.sig || { type: '', days: 90, tracked: 'untracked', region: '', q: '' });
+  const st = () => (P.state.sig = P.state.sig || { type: '', days: 90, tracked: 'untracked', region: '', q: '', archive: 'false' });
   async function load(view) {
     const f = st();
     const body = view.querySelector('#sig_body');
@@ -74,16 +74,19 @@
     P.setPage('Early signals');
     view.innerHTML = P.pageHead({ title: 'Early signals', sub: 'Who is planning to build in Central Florida, before the permit: land bought by companies, rezonings, and site and design plans. Track one to make it your lead.' }) +
       `<div class="toolbar sig-tools"><div class="chips" id="sig_types" role="group" aria-label="Signal type"></div>
-        <div class="row" style="gap:8px;flex-wrap:wrap">
+        <div class="row sig-filters" style="gap:8px;flex-wrap:wrap">
           <input type="search" data-sig="q" placeholder="Company, address, keyword" value="${esc(f.q)}" aria-label="Search early signals" style="min-width:200px">
-          <select data-sig="days" aria-label="Found in the last">${[[30, 'Last 30 days'], [90, 'Last 90 days'], [180, 'Last 6 months'], [365, 'Last year']].map(([v, t]) => `<option value="${v}" ${+f.days === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+          <select data-sig="days" aria-label="When">${[['30', 'Found in the last 30 days'], ['90', 'Last 90 days'], ['180', 'Last 6 months'], ['365', 'Last year'], ['archive', 'Archive: filed over a year ago']].map(([v, t]) => `<option value="${v}" ${(f.archive === 'true' ? 'archive' : String(f.days)) === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
           <select data-sig="tracked" aria-label="Tracking">${[['untracked', 'Not tracked yet'], ['tracked', 'Being worked'], ['all', 'All']].map(([v, t]) => `<option value="${v}" ${f.tracked === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
         </div></div>
       <div id="sig_body">${P.skeleton(6)}</div>
       <p class="small muted" style="margin-top:14px">Coverage today: City of Orlando planning applications, Orange County development and zoning cases, and Orange County property sales of $1.5M and up. Signals show intent, not confirmed Speedy scope.</p>`;
     let tmr;
     view.querySelectorAll('[data-sig]').forEach(el => el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
-      clearTimeout(tmr); tmr = setTimeout(() => { f[el.dataset.sig] = el.value; load(view); }, el.tagName === 'SELECT' ? 0 : 300);
+      clearTimeout(tmr); tmr = setTimeout(() => {
+        if (el.dataset.sig === 'days') { f.archive = el.value === 'archive' ? 'true' : 'false'; f.days = el.value === 'archive' ? 730 : Number(el.value); }
+        else f[el.dataset.sig] = el.value;
+        load(view); }, el.tagName === 'SELECT' ? 0 : 300);
     }));
     await load(view);
   };

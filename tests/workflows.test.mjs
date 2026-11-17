@@ -144,7 +144,7 @@ await test('Owner logs a call, sets a follow-up and requests a quote; history is
   assert.deepEqual(d.services_confirmed, ['Core drilling', 'GPR scanning']);
   const n = (await admin.query(`select count(*)::int n from notifications where user_id=$1 and kind='quote_requested'`, [M])).rows[0].n;
   assert.equal(n, 1, 'manager notified of quote request');
-  assert.match(d.priority_reasons.fit.find(f => f.factor === 'Scope evidence').text, /Confirmed by the contact/);
+  assert.match(d.priority_reasons.fit.find(f => f.factor === 'Speedy work evidence').text, /Contact confirmed the need/);
 });
 
 await test('Rules: reason required for Lost; follow-up needs a date; others cannot log on my lead', async () => {
@@ -449,7 +449,7 @@ await test('Discovery routing: documented scope goes to the pool and alerts mana
   const detail = await a.rpc('get_opportunity', { p_id: o1.id });
   assert.equal(detail.project.evidence[0].term, 'core drilling'); assert.equal(detail.project.category, 'Institutional & government');
   const scored = await opp(`id = '${o1.id}'`);
-  assert.ok(scored.priority_reasons.fit.some(f => f.factor === 'Scope evidence' && /Source documents core drilling/.test(f.text)));
+  assert.ok(scored.priority_reasons.fit.some(f => f.factor === 'Speedy work evidence' && /Source documents core drilling/.test(f.text)));
   const board = await b.rpc('get_board', {});
   assert.ok(!board.some(r => r.id === o3.id), 'salespeople do not see review items');
 });
@@ -734,6 +734,117 @@ await test('Early signals: a property sale and a later rezoning on the same parc
   const kept = (await b.rpc('early_signals', { p: { days: 3650, q: 'Test keep' } })).items;
   assert.equal(kept.length, 1); assert.equal(kept[0].opportunity, null, 'listed again as untracked, so anyone can still track it');
   await b.fails('refresh_retire_signals', { p_keys: ['x'], p_keep_signal: false }, /permission denied/);
+});
+
+await test('Lead score: gates keep big speculative projects out of Hot; documented scope + fresh award + verified contact is Hot; expired bids say so', async () => {
+  const run = await svc.rpc('refresh_start_run', { p_source: 'fdot_lettings', p_trigger: 'test' });
+  const mk = async (key, p) => { await svc.rpc('refresh_upsert_project', { p_run: run, p: { external_key: key, source_id: 'fdot_lettings', level: 'State', county: 'Orange', region: 'Central FL', ...p } });
+    return (await admin.query(`select o.* from opportunities o join projects p on p.id = o.project_id where p.external_key = $1`, [key])).rows[0]; };
+  // a huge planning-stage development with no stated cutting scope
+  const big = await mk('score:big', { title: 'Score test mega development', stage: 'planning', project_value: 900000000, relevance: 'potential',
+    evidence: [{ term: 'redevelopment', confidence: 'inferred' }], opportunity: { kind: 'private_project', approach: 'approach_developer', title: 'Score test mega' } });
+  await admin.query(`select private.rescore($1)`, [big.id]);
+  let r = (await admin.query(`select lead_score, lead_class, priority_reasons from opportunities where id = $1`, [big.id])).rows[0];
+  assert.equal(r.lead_class, 'Early Signal'); assert.notEqual(r.lead_class, 'Hot');
+  assert.match(r.priority_reasons.summary, /^\d+\/100\. Inferred from the project type/);
+  // documented removal scope, low bidder this week, verified estimator
+  const hot = await mk('score:hot', { title: 'Score test bridge deck replacement', stage: 'bid_closed', winner: { name: 'Score Test Bridge Co', status: 'low_bidder', as_of: new Date().toISOString().slice(0, 10) }, relevance: 'high', project_value: 12000000,
+    evidence: [{ term: 'concrete removal', confidence: 'documented', doc: 'Bid items', page: 3 }], opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Score test bridge' } });
+  await admin.query(`update projects set last_verified_at = now() where external_key = 'score:hot'`);
+  if (!hot.company_id) await admin.query(`update opportunities set company_id = private.upsert_company('Score Test Bridge Co') where id = $1`, [hot.id]);
+  const co = (await admin.query(`select company_id from opportunities where id = $1`, [hot.id])).rows[0].company_id;
+  await admin.query(`insert into contacts (company_id, name, title, phone, verified, verified_at, source) values ($1, 'Pat Estimator', 'Estimator', '407-555-0101', true, now(), 'research')`, [co]);
+  await admin.query(`select private.rescore($1)`, [hot.id]);
+  r = (await admin.query(`select lead_score, lead_class, priority_reasons from opportunities where id = $1`, [hot.id])).rows[0];
+  assert.equal(r.lead_class, 'Hot', r.priority_reasons.summary); assert.ok(r.lead_score >= 75);
+  assert.match(r.priority_reasons.summary, /Source documents concrete removal.*Apparent low bidder today.*Verified contact Pat Estimator.*Call today\./);
+  // the same lead without a contact is not Hot, and the explanation carries a research task
+  await admin.query(`update contacts set archived = true where company_id = $1`, [co]); await admin.query(`select private.rescore($1)`, [hot.id]);
+  r = (await admin.query(`select lead_class, priority_reasons from opportunities where id = $1`, [hot.id])).rows[0];
+  assert.equal(r.lead_class, 'Warm'); assert.match(r.priority_reasons.research, /Find the estimator or project manager/);
+  // a direct bid whose response date passed (stage still "upcoming") is closed by daily upkeep and shows as Expired
+  const exp = await mk('score:exp', { title: 'Score test expired notice', stage: 'upcoming', deadline: '2026-01-05T17:00:00Z', relevance: 'high',
+    evidence: [{ term: 'core drilling', confidence: 'documented' }], opportunity: { kind: 'gov_bid', approach: 'bid_direct', title: 'Score test expired' } });
+  await admin.query(`select public.daily_maintenance()`);
+  assert.equal((await admin.query(`select stage from projects where external_key = 'score:exp'`)).rows[0].stage, 'bid_closed');
+  r = (await admin.query(`select lead_class, priority_reasons from opportunities where id = $1`, [exp.id])).rows[0];
+  assert.equal(r.lead_class, 'Expired'); assert.equal(r.priority_reasons.expired, 'Bid deadline passed');
+  const board = await b.rpc('get_board');
+  const row = board.find(x => x.id === hot.id);
+  assert.ok(row.lead_score > 0 && row.lead_class && row.office === 'Orlando');
+});
+
+await test('Duplicates: same awardee across sources is suggested, a manager merges (the worked lead survives) or keeps them separate', async () => {
+  const run = await svc.rpc('refresh_start_run', { p_source: 'usaspending_awards', p_trigger: 'test' });
+  const today = new Date().toISOString().slice(0, 10);
+  const base = { level: 'Federal', county: 'Sumter', region: 'Central FL', stage: 'bid_closed', winner: { name: 'Dup Test Septic LLC', status: 'awarded', as_of: today }, relevance: 'potential' };
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, external_key: 'dup:a', source_id: 'sam_gov', title: 'Emergency lift station repair at Dup Test complex', solicitation_no: 'DUPA1',
+    opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Dup A' } } });
+  // the federal award record has no county (like the live FCC Coleman records), so the upsert cannot match it on its own
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, county: null, region: null, external_key: 'dup:b', source_id: 'usaspending_awards', title: 'Dup test complex emergency lift station repair project 2', solicitation_no: 'DUPB2',
+    opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Dup B' } } });
+  await b.fails('duplicate_candidates', {}, /manager_only/);
+  const c = (await m.rpc('duplicate_candidates')).find(x => [x.a.title, x.b.title].every(t => /Dup test/i.test(t)));
+  assert.ok(c, 'suggested'); assert.match(c.reason, /Same contractor/);
+  const oa = await opp(`external_key = 'dup:a'`), ob = await opp(`external_key = 'dup:b'`);
+  await b.rpc('claim_opportunity', { p_id: ob.id });
+  const res = await m.rpc('merge_projects', { p_keep: oa.project_id, p_drop: ob.project_id });
+  assert.equal(res.lead, ob.id, 'the lead someone is working is the one kept');
+  assert.equal((await opp(`id = '${oa.id}'`)).stage, 'archived');
+  const kept = (await admin.query(`select alt_keys, solicitation_no from projects where id = $1`, [oa.project_id])).rows[0];
+  assert.ok(kept.alt_keys.includes('dup:b'), 'the other source will update this project from now on');
+  const tl = await b.rpc('project_timeline', { p_project: oa.project_id });
+  assert.ok(tl.some(e => e.kind === 'merged') && tl.some(e => e.kind === 'award'));
+  assert.equal((await m.rpc('duplicate_candidates')).filter(x => /Dup test/i.test(x.a.title + x.b.title)).length, 0);
+  // two different jobs for the same contractor can be marked separate and are not suggested again
+  await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, county: null, region: null, external_key: 'dup:c', source_id: 'sam_gov', title: 'Dup test complex lift station repair phase 2', solicitation_no: 'DUPC3',
+    opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Dup C' } } });
+  const c2 = (await m.rpc('duplicate_candidates')).find(x => /phase 2/.test(x.a.title + x.b.title));
+  assert.ok(c2);
+  await m.rpc('separate_projects', { p_a: c2.a.id, p_b: c2.b.id, p_note: 'different phase' });
+  assert.equal((await m.rpc('duplicate_candidates')).filter(x => /phase 2/.test(x.a.title + x.b.title)).length, 0);
+});
+
+await test('Claims expire: an unworked New lead goes back to Available after the configured days, with history and a notice; worked ones stay', async () => {
+  const o1 = await opp(`stage='available' and not needs_review and not exists (select 1 from ownership_history h where h.opportunity_id = z.id)`);
+  await a.rpc('claim_opportunity', { p_id: o1.id });
+  await admin.query(`update opportunities set claimed_at = now() - interval '30 days', last_activity_at = null where id = $1`, [o1.id]);
+  const r = (await admin.query(`select private.expire_claims() r`)).rows[0].r;
+  assert.ok(r.released >= 1);
+  const after = await opp(`id = '${o1.id}'`);
+  assert.equal(after.owner_id, null); assert.equal(after.stage, 'available');
+  assert.match((await admin.query(`select reason from ownership_history where opportunity_id = $1 order by id desc limit 1`, [o1.id])).rows[0].reason, /Automatic: no activity logged in 21 days/);
+  await admin.query(`update settings set value = '0' where key = 'claim_release_days'`);
+  assert.equal((await admin.query(`select private.expire_claims() r`)).rows[0].r.off, true);
+  await admin.query(`update settings set value = '21' where key = 'claim_release_days'`);
+});
+
+await test('Company directory for everyone; outcomes report for managers only, with observed numbers', async () => {
+  const dir = await b.rpc('company_directory', { p: { q: 'Dup Test' } });
+  assert.ok(dir.length >= 1 && dir[0].awards >= 1);
+  await b.fails('outcome_report', {}, /manager_only/);
+  const rep = await m.rpc('outcome_report', { p: {} });
+  assert.ok(Array.isArray(rep.by_source) && 'median_hours_to_first_contact' in rep && /not project budgets/.test(rep.note));
+});
+
+await test('Source health: a quiet source is judged against its normal pace; zero records read is flagged; coverage is manager-only and honest', async () => {
+  await b.fails('coverage_status', {}, /manager_only/);
+  await admin.query(`update sources set last_run_at = now(), last_success_at = now(), last_status = 'success', enabled = true where id in ('orlando_permits','fdot_lettings')`);
+  await admin.query(`insert into refresh_runs (source_id, trigger, status, started_at, finished_at, examined, discovered) values
+    ('orlando_permits', 'test', 'success', now() - interval '20 days', now() - interval '20 days', 40, 5),
+    ('orlando_permits', 'test', 'success', now(), now(), 38, 0),
+    ('fdot_lettings', 'test', 'success', now() - interval '20 days', now() - interval '20 days', 43, 4),
+    ('fdot_lettings', 'test', 'success', now(), now(), 0, 0)`);
+  const cov = await m.rpc('coverage_status');
+  const h = Object.fromEntries(cov.sources.map(x => [x.id, x]));
+  assert.equal(h.orlando_permits.status, 'Stale', 'permits normally arrive within days: ' + h.orlando_permits.why);
+  assert.equal(h.fdot_lettings.status, 'Degraded', 'a successful run that read nothing is suspicious: ' + h.fdot_lettings.why);
+  assert.ok(h.orlando_permits.last_new && h.orlando_permits.last_attempt && h.orlando_permits.last_success);
+  assert.equal(cov.counties.length, 67);
+  const orange = cov.counties.find(c => c.county === 'Orange'), lake = cov.counties.find(c => c.county === 'Lake');
+  assert.ok(orange.local.length >= 4); assert.equal(lake.local.length, 0, 'no local source is claimed where there is none');
+  assert.ok(cov.registry.some(r => r.jurisdiction === 'City of Fort Lauderdale' && r.status === 'Stale'));
+  assert.ok(cov.next[0].value >= cov.next[cov.next.length - 1].value);
 });
 
 await test('Refresh schedule settings are validated on the server and keep the source lists', async () => {
