@@ -12,7 +12,9 @@
     const n = name.toUpperCase().replace(/[^A-Z0-9 &]/g, ' ').replace(/\s+/g, ' ').trim();
     return `https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchNameOrder=${encodeURIComponent(n.replace(/\s/g, ''))}&searchTerm=${encodeURIComponent(n)}`;
   };
-  const parcelUrl = (id, county) => id && county === 'Orange' ? `https://ocpaweb.ocpafl.org/parcelsearch/Parcel%20ID/${encodeURIComponent(String(id).replace(/\D/g, ''))}` : null;
+  const parcelUrl = (id, county) => !id ? null
+    : county === 'Orange' ? `https://ocpaweb.ocpafl.org/parcelsearch/Parcel%20ID/${encodeURIComponent(String(id).replace(/\D/g, ''))}`
+    : county === 'Miami-Dade' ? `https://www.miamidade.gov/Apps/PA/propertysearch/#/?folio=${encodeURIComponent(String(id).replace(/\D/g, ''))}` : null;
 
   P.peopleHtml = (list) => {
     if (!list || !list.length) return '';
@@ -30,7 +32,7 @@
       const related = (r.related || []).map(x => `<li><span class="badge">${esc(TYPE[x.signal_type] || P.PSTAGE[x.stage] || x.stage)}</span> ${x.opp ? `<a href="#/lead/${x.opp}" data-lead="${x.opp}">${esc(x.title)}</a>` : esc(x.title)}
           <span class="sub">${esc(x.source_name || '')}, found ${esc(P.date(x.found_at))}</span></li>`).join('');
       el.innerHTML = (r.stakeholders || []).length || related || pu ? `<div class="panel"><h3>People and companies</h3>${P.peopleHtml(r.stakeholders) || '<p class="muted small">No names on the public record yet.</p>'}
-        ${pu || r.acreage ? `<p class="small" style="margin-top:8px">${r.acreage ? `${esc(String(r.acreage))} acres. ` : ''}${pu ? `<a href="${pu}" target="_blank" rel="noopener">Property record (parcel ${esc(r.parcel_id)})${P.icon('ext', 'sm')}</a>` : ''}</p>` : ''}
+        ${pu || r.acreage ? `<p class="small" style="margin-top:8px">${r.acreage ? `${esc(String(r.acreage))} acres. ` : ''}${pu ? `<a href="${pu}" target="_blank" rel="noopener">Property record (${r.county === 'Miami-Dade' ? 'folio' : 'parcel'} ${esc(r.parcel_id)})${P.icon('ext', 'sm')}</a>` : ''}</p>` : ''}
         ${related ? `<h3 style="margin-top:14px">Same property, other records</h3><ul class="plain-list">${related}</ul>` : ''}</div>` : '';
     } catch (e) { el.innerHTML = ''; }
   };

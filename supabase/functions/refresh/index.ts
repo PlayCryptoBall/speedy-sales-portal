@@ -6,6 +6,7 @@ import {
   normalizeSgs, normalizeUsa, groupPermits, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
   USA_NAICS, usaPayload, usaSearchBody, normalizeOrlandoPlanning, planningWanted, planningSections, planningPayload,
   normalizeCountyCase, countyCaseWanted, countyCasePayload, normalizeSale, groupSales, saleWanted, salePayload,
+  MD_DATASET, MD_TYPES, normalizeMiamiDadePermit, groupMiamiDade, miamiDadeWanted, miamiDadeSections, miamiDadePayload, mdValue, type MdPermit,
 } from './lib.ts';
 import { DEFAULT_TERMS, type Term } from './terms.ts';
 
@@ -289,6 +290,54 @@ async function runPermits(run: Run, cfg: any, sourceId: string) {
   }
 }
 
+// ---------------------------------------------------------------- Miami-Dade County building permits (county ArcGIS open data)
+async function runMiamiDade(run: Run, cfg: any, sourceId: string) {
+  const base = cfg.dataset ?? MD_DATASET;
+  const days = cfg.lookback_days ?? 30;
+  const since = new Date(Date.now() - days * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const fields = 'PermitNumber,MasterPermitNumber,ProcessNumber,PermitType,ApplicationTypeDescription,ProposedUseDescription,DetailDescriptionComments,' +
+    'EstimatedValue,ApplicationDate,PermitIssuedDate,FolioNumber,OwnerName,PropertyAddress,ArchitectName,ContractorNumber,ContractorName,' +
+    'ContractorAddress,ContractorCity,ContractorState,ContractorZip,ContractorPhone,SquareFootage';
+  const q = async (where: string, offset = 0) => {
+    const j = await run.get(`${base}/query?where=${encodeURIComponent(where)}&outFields=${fields}&orderByFields=ObjectId&resultOffset=${offset}` +
+      `&resultRecordCount=1000&returnGeometry=false&f=json`, 'application/json');
+    if (j?.error) throw new Error(j.error.message || 'query failed');
+    return { rows: (j.features || []).map((f: any) => f.attributes) as any[], more: !!j.exceededTransferLimit };
+  };
+  const types = MD_TYPES.map(t => `'${t}'`).join(',');
+  const where = `ResidentialCommercial='C' AND PermitType IN ('BLDG','MBLD') AND ApplicationTypeDescription IN (${types}) AND ApplicationDate >= DATE '${since}'`;
+  const rows: any[] = [];
+  for (let off = 0, i = 0; i < (cfg.max_pages ?? 5); i++, off += 1000) {
+    const r = await q(where, off); rows.push(...r.rows);
+    if (!r.more || run.timeUp()) break;
+  }
+  const permits: MdPermit[] = rows.map(normalizeMiamiDadePermit).filter(x => x.number);
+  run.counts.examined += permits.length;
+  // the builder is on the master permit, often filed before the lookback window
+  const have = new Set(permits.map(p => p.number));
+  const masters = [...new Set(permits.map(p => p.master).filter((m): m is string => !!m && !have.has(m)))];
+  for (let i = 0; i < masters.length && !run.timeUp(); i += 60) {
+    const list = masters.slice(i, i + 60).map(m => `'${m.replace(/[^0-9A-Z]/gi, '')}'`).join(',');
+    try { permits.push(...(await q(`PermitNumber IN (${list})`)).rows.map(normalizeMiamiDadePermit).filter(x => x.number)); }
+    catch (e) { run.note(`master permits could not be read (${(e as Error).message})`); }
+  }
+  const groups = groupMiamiDade(permits).filter(g => g.some(x => (x.processed || '') >= since));
+  const keep = groups.filter(g => miamiDadeWanted(g, cfg));
+  run.note(`${permits.length} commercial building permits since ${since} (with ${masters.length} master permits), ${groups.length} jobs, ${keep.length} kept`);
+  keep.sort((a, b) => (mdValue(b) || 0) - (mdValue(a) || 0));
+  const maxNew = cfg.max_new_per_run ?? 40;
+  let newOnes = 0;
+  for (const g of keep) {
+    if (run.timeUp()) { run.note('time budget reached; the rest wait for the next run'); break; }
+    const cls = classify(miamiDadeSections(g), run.terms, { value: mdValue(g) });
+    if (cls.relevance === 'low') { run.counts.low += g.length; continue; }
+    run.counts.relevant += g.length;
+    if (newOnes >= maxNew) { run.note(`new-item cap of ${maxNew} reached; the rest wait for the next run`); break; }
+    const r = await run.upsert(miamiDadePayload(g, cls, { source_id: sourceId }));
+    if ((r as any)?.action === 'discovered') newOnes++;
+  }
+}
+
 // ---------------------------------------------------------------- early signals: planning, development cases, land sales
 async function runOrlandoPlanning(run: Run, cfg: any, sourceId: string) {
   const days = cfg.lookback_days ?? 60;
@@ -427,6 +476,7 @@ async function runSource(source: string, trigger: string, user: string | null, a
     if (source === 'fdot_lettings') await runFdot(run, cfg);
     else if (source === 'sam_gov') await runSam(run, cfg);
     else if (source === 'usaspending_awards') await runUsaspending(run, cfg);
+    else if (source === 'miamidade_permits') await runMiamiDade(run, cfg, source);
     else if (source.endsWith('_permits')) await runPermits(run, cfg, source);
     else if (source === 'orlando_planning') await runOrlandoPlanning(run, cfg, source);
     else if (source === 'orange_dev_cases') await runCountyCases(run, cfg, source);
@@ -548,7 +598,7 @@ Deno.serve(async (req) => {
   const work = (async () => {
     if (source === 'retry_failed') return retryFailed();
     if (source === 'maintenance') return db.rpc('daily_maintenance');
-    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales'] : [source];
+    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales', 'miamidade_permits'] : [source];
     const out = [];
     for (const s of list) out.push(await runSource(s, trigger, auth.user));
     return out;

@@ -538,6 +538,124 @@ export function permitPayload(x: Permit, cls: Classification, cfg: { city: strin
   };
 }
 
+// ---------------------------------------------------------------- Miami-Dade County building permits (ArcGIS open data)
+// Each trade (roofing, windows, pool) pulls its own permit under the building's master permit and repeats the master's value,
+// so permits are grouped by master number, the value is the largest one (never a sum), and the builder comes from the master.
+export interface MdPermit extends Permit { master: string | null; use: string; detail: string; folio: string | null; architect: string | null; license: string | null }
+export const MD_TYPES = ['NEW', 'ALTER - INTERIOR', 'ALTER - EXTERIOR', 'ADDITION - ATTACHED', 'ADDITION - DETACHED', 'DEMOLISH', 'SHELL ONLY',
+  'CONCRETE MASONRY', 'REPAIR', 'REPAIR - FIRE DAMAGE'];
+export const MD_DATASET = 'https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/arcgis/rest/services/miamidade_permit_data/FeatureServer/0';
+// Trade contractors pull sub-permits; they are on the job but are not the builder Speedy sells to.
+const TRADE = /\b(roof\w*|windows?|glass|glazing|screens?|shutters?|pools?|tanks?|pumps?|electric\w*|plumb\w*|air cond\w*|a\/c|hvac|mechanical|cladding|awnings?|fenc\w*|signs?|sprinkler\w*|fire protection|elevators?|solar|doors?|waterproof\w*|insulation|drywall|tile)\b/i;
+// Permit work with no cutting, coring or removal in it.
+const MD_SKIP = /\b(pools?|swimming|re-?roof\w*|roof\w*|tents?|short term event|event|awnings?|signs?|fenc\w*|tanks?|ast|hollow metal doors?|windows?|shutters?|curtain wall|storefronts?|glass|glazing|solar|tippers|screen enclosure|carport|canopy only)\b/i;
+const MD_ABBR: [RegExp, string][] = [[/\bINT\b/g, 'interior'], [/\bALT\b/g, 'alteration'], [/\bRENO\b/g, 'renovation'], [/\bDEM\b|\bDEMO\b/g, 'demolition'],
+  [/\bBLDG\b|\bBUILD\b(?!\s*OUT)/g, 'building'], [/\bRPL\b/g, 'replace'], [/\bMULT FAM\b/g, 'multifamily'], [/\bCONST\b/g, 'construction'], [/\bADD\b/g, 'addition'],
+  [/\bREMODE?\b/g, 'remodel'], [/\bSTA\b/g, 'stations'], [/\bEXT\b/g, 'extension'], [/\bCUR WALL\b/g, 'curtain wall'], [/\bWNDW\b/g, 'window'], [/\bSTRFT\b/g, 'storefront']];
+export const mdExpand = (s: string) => MD_ABBR.reduce((t, [re, w]) => t.replace(re, w), (s || '').toUpperCase()).replace(/\s+/g, ' ').trim();
+const mdDate = (v: any) => {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return new Date(v).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return String(v).slice(0, 10);
+};
+export function normalizeMiamiDadePermit(a: any): MdPermit {
+  const num = (s: any) => { const n = Number(String(s ?? '').replace(/[^0-9.]/g, '')); return isFinite(n) && n > 0 ? n : null; };
+  const t = clean(a.ApplicationTypeDescription).toUpperCase();
+  const worktype = /^NEW|^SHELL/.test(t) ? 'New' : /^ALTER/.test(t) ? 'Alteration' : /^ADDITION/.test(t) ? 'Addition' : /^DEMOL/.test(t) ? 'Demolition'
+    : /^REPAIR|^CONCRETE MASONRY/.test(t) ? 'Repair' : t;
+  const master = clean(a.MasterPermitNumber).replace(/^0+$/, '') || null;
+  const arch = clean(a.ArchitectName);
+  const caddr = [clean(a.ContractorAddress), clean(a.ContractorCity), [clean(a.ContractorState), clean(a.ContractorZip)].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const detail = clean(a.DetailDescriptionComments), use = clean(a.ProposedUseDescription);
+  return {
+    number: clean(a.PermitNumber), worktype, appType: t, address: clean(a.PropertyAddress), owner: clean(a.OwnerName).replace(/^REF[- ]?ONLY ?(?:THE )?/i, '').replace(/^REFE-ONLY ?/i, ''),
+    contractor: clean(a.ContractorName).replace(/\\,/g, ','), phone: clean(a.ContractorPhone) || null, contractorAddress: caddr || null,
+    value: num(a.EstimatedValue), status: mdDate(a.PermitIssuedDate) ? 'issued' : 'in review', processed: mdDate(a.ApplicationDate), issued: mdDate(a.PermitIssuedDate),
+    project: [detail, use].filter(Boolean).join(' — '), sqft: num(a.SquareFootage) && num(a.SquareFootage)! > 1 ? num(a.SquareFootage) : null, provider: null,
+    master: master && master !== clean(a.PermitNumber) ? master : null, use, detail, folio: clean(a.FolioNumber) || null,
+    architect: arch && !/^(not listed|none|n\/a)$/i.test(arch) ? arch : null, license: clean(a.ContractorNumber) || null,
+  };
+}
+export const mdIsTrade = (x: Permit) => TRADE.test(x.contractor || '');
+export const mdBuilder = (x: Permit) => { const b = builderOf(x); return b && !TRADE.test(b) ? b : null; };
+// One lead per master permit (or per stand-alone permit).
+export function groupMiamiDade(list: MdPermit[]): MdPermit[][] {
+  const g = new Map<string, MdPermit[]>();
+  for (const x of list) { const k = x.master || x.number; if (!g.has(k)) g.set(k, []); g.get(k)!.push(x); }
+  return [...g.entries()].map(([k, v]) => v.sort((a, b) => (a.number === k ? -1 : b.number === k ? 1 : (b.value || 0) - (a.value || 0))));
+}
+export const mdLead = (group: MdPermit[]) => group.find(x => x.number === (group[0].master || group[0].number)) || group.find(x => mdBuilder(x)) || group[0];
+export const mdValue = (group: MdPermit[]) => Math.max(0, ...group.map(g => g.value || 0)) || null;
+export function miamiDadeWanted(group: MdPermit[], cfg: { min_value?: number; min_demo_value?: number } = {}): boolean {
+  const lead = mdLead(group), v = mdValue(group) || 0;
+  if (!lead.number || /^(CONDO\/APT INDIVIDUAL UNIT|SINGLE FAMILY|DUPLEX|SHORT TERM EVENT|TENT)/i.test(lead.use)) return false;
+  const min = /^Demol/.test(lead.worktype) ? (cfg.min_demo_value ?? 50_000) : (cfg.min_value ?? 250_000);
+  if (v < min) return false;
+  // every permit in the group is a trade job with no structural work described (a re-roof, a pool, windows)
+  const real = group.filter(g => !(MD_SKIP.test(mdExpand(g.detail)) && !/\b(demolition|concrete|structural|building|build-?out|addition|interior|renovation|restaurant|office|school|hospital)\b/i.test(mdExpand(g.detail))));
+  return real.length > 0;
+}
+export function miamiDadeSections(group: MdPermit[]): Section[] {
+  const out: Section[] = [];
+  for (const x of group.slice(0, 6)) {
+    const doc = `Miami-Dade County permit ${x.number}`, url = mdPermitUrl(x.number);
+    const work = /^Alt/.test(x.worktype) ? 'Commercial alteration' : /^Add/.test(x.worktype) ? 'Commercial building addition' : /^Demo/.test(x.worktype) ? 'Commercial demolition'
+      : /^Repair/.test(x.worktype) ? 'Commercial structural repair' : ((x.value ?? 0) >= 5_000_000 ? 'Large new building' : 'New building');
+    out.push({ field: 'permit work type', text: work, doc, url }, { field: 'permit description', text: mdExpand(x.detail).toLowerCase(), doc, url },
+      { field: 'proposed use', text: x.use.toLowerCase(), doc, url });
+  }
+  return out;
+}
+export const mdPermitUrl = (n: string) => `${MD_DATASET}/query?where=${encodeURIComponent(`PermitNumber='${n}'`)}&outFields=*&returnGeometry=false&f=html`;
+export const mdFolioUrl = (folio: string) => `https://www.miamidade.gov/Apps/PA/propertysearch/#/?folio=${encodeURIComponent(folio.replace(/\D/g, ''))}`;
+export function miamiDadePayload(group: MdPermit[], cls: Classification, cfg: { source_id: string }) {
+  const x = mdLead(group), key = x.master || x.number;
+  const url = mdPermitUrl(x.number), total = mdValue(group);
+  const stage = x.issued ? 'preconstruction' : 'permitting';
+  const work = /^Alt/.test(x.worktype) ? 'alteration' : /^Add/.test(x.worktype) ? 'addition' : /^Demo/.test(x.worktype) ? 'demolition' : /^Repair/.test(x.worktype) ? 'repair' : 'new building';
+  const what = mdExpand(x.detail);
+  const place = titleCase(x.address.replace(/\s{2,}.*$/, ''));
+  const name = what ? `${titleCase(what.toLowerCase())}` : `Commercial ${work}`;
+  const more = group.length > 1 ? ` (${group.length} permits)` : '';
+  const title = `${name} (${work}, ${place})${more}`.slice(0, 160);
+  const gcPermit = group.find(g => mdBuilder(g));
+  const company = gcPermit ? titleCase(mdBuilder(gcPermit)!.replace(/\s*\bDBA:.*$/i, '')) : null;
+  const money = total ? `$${Math.round(total).toLocaleString('en-US')}` : null;
+  const src = 'Miami-Dade County permit';
+  const stakeholders: Stakeholder[] = [];
+  if (x.owner && x.owner.length > 2) stakeholders.push({ role: 'owner', name: titleCase(x.owner), source: src, url });
+  if (gcPermit && company) stakeholders.push({ role: 'contractor', name: company, phone: gcPermit.phone, address: gcPermit.contractorAddress ? titleCase(gcPermit.contractorAddress) : null, source: `${src} ${gcPermit.number}`, url: mdPermitUrl(gcPermit.number) });
+  const arch = group.map(g => g.architect).find(Boolean);
+  if (arch) stakeholders.push({ role: ENGINEER.test(arch) ? 'engineer' : 'architect', name: titleCase(arch), source: src, url });
+  for (const g of group) if (g !== gcPermit && mdIsTrade(g) && builderOf(g))
+    stakeholders.push({ role: 'contractor', name: `${titleCase(g.contractor.replace(/\s*\bDBA:.*$/i, ''))} (trade: ${g.detail.toLowerCase() || g.appType.toLowerCase()})`, phone: g.phone, source: `${src} ${g.number}`, url: mdPermitUrl(g.number) });
+  const p: Record<string, unknown> = {
+    external_key: `mdc:${key}`, alt_keys: group.map(g => `mdc:${g.number}`).filter(k => k !== `mdc:${key}`),
+    source_id: cfg.source_id, source_url: url, source_name: 'Miami-Dade County building permits',
+    solicitation_no: null, title, short_title: title.length > 60 ? title.slice(0, 57) + '...' : title,
+    owner_name: x.owner ? titleCase(x.owner) : null, level: /\b(county|city of|state of|united states|school board|authority)\b/i.test(x.owner) ? 'Local' : 'Private',
+    city: null, county: 'Miami-Dade', region: regionForCounty('Miami-Dade'), location_text: `${place}, Miami-Dade County`, stage,
+    status_text: (group.length > 1 ? `Master permit ${key} with ${group.length} permits: ${group.map(g => `${g.number} (${g.status})`).join(', ')}`
+      : `Commercial ${work} permit ${x.number}: ${x.status}${x.processed ? `, applied ${x.processed}` : ''}${x.issued ? `, issued ${x.issued}` : ''}`).slice(0, 400),
+    project_value: total, value_label: money ? `${money} permit valuation` : null, published_at: group.map(g => g.processed).filter(Boolean).sort()[0] || null,
+    size_note: [x.sqft && `${x.sqft.toLocaleString('en-US')} sq ft`, x.use && titleCase(x.use.toLowerCase())].filter(Boolean).join(' · ') || null,
+    source_summary: `Permit ${group.map(g => g.number).join(', ')} (${x.appType}${x.use ? `, ${x.use.toLowerCase()}` : ''}): ${what.toLowerCase() || 'no description'}. ` +
+      `Builder of record: ${company || (x.contractor && !/^owner$/i.test(x.contractor) ? `trade contractor only (${titleCase(x.contractor)})` : 'owner-builder or not listed')}.`,
+    services_likely: cls.services, relevance: cls.relevance, relevance_score: cls.score, evidence: cls.evidence, category: cls.category, review_reason: cls.reason,
+    pocs: company && gcPermit?.phone ? [{ name: company, title: 'Permit contractor of record', phone: gcPermit.phone, email: null }] : [],
+    extras: { stakeholders, parcel_id: x.folio, signal_type: 'permit' },
+  };
+  if (cls.relevance !== 'low') p.opportunity = company ? {
+    kind: 'private_project', approach: 'approach_prime', title: `${company} — ${name}`.slice(0, 200), company_name: company, company_phone: gcPermit!.phone,
+    company_address: gcPermit!.contractorAddress ? titleCase(gcPermit!.contractorAddress) : null,
+    next_action: nextActionFor(stage, 'approach_prime', { company, services: cls.services }), services: cls.services,
+  } : {
+    kind: 'private_project', approach: 'approach_developer', title: `${x.owner ? titleCase(x.owner) + ' — ' : ''}${name}`.slice(0, 200),
+    next_action: 'No general contractor on the permit (owner-builder): call the owner or the architect to find out who is building it.', services: cls.services,
+  };
+  return p;
+}
+
 // ---------------------------------------------------------------- early signals (Mercator-style): who is planning to build, before permits
 // Stages follow the development timeline: land (bought) -> planning (entitlement: rezoning, comp plan) -> design (site plans,
 // master plans, design review) -> permitting -> construction. Early signals are kept as projects; only the ones whose text

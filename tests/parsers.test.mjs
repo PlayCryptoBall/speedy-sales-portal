@@ -362,5 +362,46 @@ await t('Property sales: one record per deal, companies buying land or commercia
   assert.equal(p.extras.stakeholders[0].role, 'buyer'); assert.match(p.extras.stakeholders[0].address, /1 Main St/);
 });
 
+await t('Miami-Dade permits: grouped by master permit, builder from the master, trade permits and re-roofs dropped, value never summed', () => {
+  const rec = (o) => L.normalizeMiamiDadePermit({ PermitNumber: '2027000001', MasterPermitNumber: '0000000000', PermitType: 'BLDG', ApplicationTypeDescription: 'ALTER - INTERIOR',
+    ProposedUseDescription: 'RESTAURANT/CAFET/BAR/LOUNGE/NIGHT CLUB', DetailDescriptionComments: 'INT REMODEL/OFFICES', EstimatedValue: '1250000',
+    ApplicationDate: Date.UTC(2026, 9, 20, 4), PermitIssuedDate: null, FolioNumber: '3000000000001', OwnerName: 'EXAMPLE ACRES LLC',
+    PropertyAddress: '100 SW 1 ST', ArchitectName: 'EXAMPLE ARCHITECTS', ContractorNumber: 'CGC0000001', ContractorName: 'EXAMPLE BUILDERS\\, INC. DBA:EXAMPLE CONSTRUC',
+    ContractorAddress: '1 BUILDER WAY', ContractorCity: 'MIAMI', ContractorState: 'FL', ContractorZip: '33101', ContractorPhone: '(305)555-0100', SquareFootage: '5200', ...o });
+  const master = rec({ PermitNumber: '2026000100' });
+  const roof = rec({ PermitNumber: '2027000002', MasterPermitNumber: '2026000100', ContractorName: 'EXAMPLE ROOFING INC', ContractorPhone: '(305)555-0111' });
+  const pool = rec({ PermitNumber: '2027000003', DetailDescriptionComments: 'SWIMMING POOL', ApplicationTypeDescription: 'ADDITION - DETACHED', EstimatedValue: '550000' });
+  const reroof = rec({ PermitNumber: '2027000004', ApplicationTypeDescription: 'REPAIR', DetailDescriptionComments: 'REPAIRS/RPL ROOF', ContractorName: 'EXAMPLE ROOF CORP' });
+  const small = rec({ PermitNumber: '2027000005', ApplicationTypeDescription: 'ALTER - INTERIOR', EstimatedValue: '90000' });
+  const demo = rec({ PermitNumber: '2027000006', ApplicationTypeDescription: 'DEMOLISH', DetailDescriptionComments: 'DEMO BLDG', EstimatedValue: '80000', ContractorName: 'OWNER' });
+  const unit = rec({ PermitNumber: '2027000007', ProposedUseDescription: 'CONDO/APT INDIVIDUAL UNIT', EstimatedValue: '400000' });
+  assert.equal(roof.master, '2026000100'); assert.equal(master.master, null); assert.equal(roof.processed, '2026-10-20');
+  const groups = L.groupMiamiDade([roof, master, pool, reroof, small, demo, unit]);
+  assert.equal(groups.length, 6, 'the roofing sub-permit joins its master');
+  const job = groups.find(g => g.length === 2);
+  assert.equal(L.mdLead(job).number, '2026000100'); assert.equal(L.mdValue(job), 1250000, 'sub-permits repeat the master value');
+  const want = (n) => L.miamiDadeWanted(groups.find(g => g[0].number === n));
+  assert.equal(L.miamiDadeWanted(job), true);
+  assert.equal(want('2027000003'), false, 'pools are not Speedy work');
+  assert.equal(want('2027000004'), false, 'a re-roof is not Speedy work');
+  assert.equal(want('2027000005'), false, 'under $250,000');
+  assert.equal(want('2027000006'), true, 'demolition from $50,000');
+  assert.equal(want('2027000007'), false, 'a single condo unit');
+  const cls = L.classify(L.miamiDadeSections(job));
+  assert.notEqual(cls.relevance, 'low');
+  const p = L.miamiDadePayload(job, cls, { source_id: 'miamidade_permits' });
+  assert.equal(p.external_key, 'mdc:2026000100'); assert.deepEqual(p.alt_keys, ['mdc:2027000002']);
+  assert.equal(p.county, 'Miami-Dade'); assert.equal(p.region, 'Southeast FL'); assert.equal(p.project_value, 1250000);
+  assert.equal(p.opportunity.company_name, 'Example Builders, INC.'); assert.equal(p.opportunity.approach, 'approach_prime');
+  const roles = p.extras.stakeholders.map(x => x.role);
+  assert.deepEqual(roles, ['owner', 'contractor', 'architect', 'contractor']);
+  assert.match(p.extras.stakeholders[3].name, /Example Roofing INC \(trade/);
+  assert.equal(p.extras.parcel_id, '3000000000001'); assert.equal(p.extras.signal_type, 'permit');
+  assert.match(p.source_url, /PermitNumber%3D'2026000100'|PermitNumber%3D%272026000100%27/);
+  const d = L.miamiDadePayload(groups.find(g => g[0].number === '2027000006'), L.classify(L.miamiDadeSections(groups.find(g => g[0].number === '2027000006'))), { source_id: 'miamidade_permits' });
+  assert.equal(d.opportunity.approach, 'approach_developer', 'owner-builder: approach the owner');
+  assert.match(d.title, /^Demolition Building \(demolition, 100 Sw 1 St\)$/);
+});
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);
