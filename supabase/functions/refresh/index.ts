@@ -6,9 +6,11 @@ import {
   normalizeSgs, normalizeUsa, groupPermits, parseFdotList, parseFdotReport, permitPayload, permitSections, SAM_SEARCH, samFacts, samPayload, type SamNotice,
   USA_NAICS, usaPayload, usaSearchBody, normalizeOrlandoPlanning, planningWanted, planningSections, planningPayload,
   normalizeCountyCase, countyCaseWanted, countyCasePayload, normalizeSale, groupSales, saleWanted, salePayload,
+  bidTabLinks, parseBidTabItems, bidTabPayload,
   MD_DATASET, MD_TYPES, normalizeMiamiDadePermit, groupMiamiDade, miamiDadeWanted, miamiDadeSections, miamiDadePayload, mdValue, type MdPermit,
 } from './lib.ts';
 import { DEFAULT_TERMS, type Term } from './terms.ts';
+import { extractText, getDocumentProxy } from 'npm:unpdf@1.0.6';
 
 const URL_ = Deno.env.get('SUPABASE_URL')!;
 const SERVICE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -290,6 +292,71 @@ async function runPermits(run: Run, cfg: any, sourceId: string) {
   }
 }
 
+// ---------------------------------------------------------------- FDOT bid tabulations: pay items and quantities for tracked contracts
+const BIDTAB_PAGES = [
+  'https://www.fdot.gov/contracts/Lettings/Letting-Project-Info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d1/lettings/dist-letting-project-info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d2/lettings/dist-letting-project-info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d3/lettings/dist-letting-project-info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d4/lettings/dist4letting-project-info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d5/lettings/dist-letting-project-info.shtm',
+  'https://www.fdot.gov/contracts/district-offices/d6/lettings',
+  'https://www.fdot.gov/contracts/district-offices/d7/lettings/dist-letting-project-info.shtm',
+];
+async function pdfText(run: Run, url: string): Promise<string> {
+  if (run.requests >= run.maxRequests) throw new Error(`request cap of ${run.maxRequests} reached for this run`);
+  const wait = run.last + run.gapMs - Date.now(); if (wait > 0) await sleep(wait);
+  run.last = Date.now(); run.requests++;
+  const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/pdf' }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  const pdf = await getDocumentProxy(buf);
+  const { text } = await extractText(pdf, { mergePages: true });
+  return Array.isArray(text) ? text.join('\n') : text;
+}
+async function runBidTabs(run: Run, cfg: any, sourceId: string) {
+  const days = cfg.lookback_days ?? 150;
+  const { data: rows, error } = await db.from('projects').select('external_key, solicitation_no, published_at')
+    .eq('source_id', 'fdot_lettings').like('external_key', 'fdot:%').is('merged_into', null)
+    .gte('published_at', new Date(Date.now() - days * 86400000).toISOString().slice(0, 10));
+  if (error) throw new Error(error.message);
+  const done = new Set<string>((cfg.done || []) as string[]);
+  const want = new Map<string, string>();
+  for (const r of rows || []) { const c = String(r.external_key).slice(5).toUpperCase(); if (!done.has(c)) want.set(c, r.external_key); }
+  run.note(`${rows?.length || 0} FDOT contracts from the last ${days} days, ${want.size} without a bid tabulation read yet`);
+  if (!want.size) return;
+  const links = new Map<string, string>();
+  for (const page of (cfg.pages ?? BIDTAB_PAGES) as string[]) {
+    try { for (const [c, u] of bidTabLinks(await run.get(page))) if (!links.has(c)) links.set(c, u); }
+    catch (e) { run.counts.errors++; run.note(`bid tab list ${page} failed: ${(e as Error).message}`); }
+  }
+  run.counts.fetched = Math.max(run.counts.fetched, links.size ? 1 : 0);
+  const todo = [...want.keys()].filter(c => links.has(c));
+  run.note(`${links.size} bid tabulations posted on the FDOT pages; ${todo.length} match tracked contracts`);
+  const maxPdf = cfg.max_pdfs_per_run ?? 25;
+  const newlyDone: string[] = [];
+  for (const c of todo.slice(0, maxPdf)) {
+    if (run.timeUp()) { run.note('time budget reached; the rest wait for the next run'); break; }
+    const url = links.get(c)!;
+    try {
+      const text = await pdfText(run, url);
+      const items = parseBidTabItems(text);
+      if (cfg.debug) run.note(`${c} text sample: ${text.replace(/\s+/g, ' ').slice(2400, 3400)}`);
+      run.counts.examined++;
+      if (!items.length) { run.note(`${c}: no pay items could be read from the tabulation`); newlyDone.push(c); continue; }
+      const { payload, matched } = bidTabPayload(want.get(c)!, c, url, text, items, run.terms);
+      if (matched.length) run.counts.relevant++; else run.counts.low++;
+      run.note(`${c}: ${items.length} pay items, ${matched.length} Speedy items${matched.length ? ': ' + matched.slice(0, 4).map(x => `${x.desc.toLowerCase()} ${x.qty ?? ''} ${x.unit ?? ''}`.trim()).join('; ') : ''}`);
+      const r = await run.upsert(payload);
+      if (r) newlyDone.push(c);
+    } catch (e) { run.counts.errors++; run.note(`${c}: bid tabulation could not be read (${(e as Error).message})`); }
+  }
+  if (newlyDone.length) {
+    const keep = [...done, ...newlyDone].slice(-600);
+    await db.from('sources').update({ config: { ...cfg, done: keep } }).eq('id', sourceId);
+  }
+}
+
 // ---------------------------------------------------------------- Miami-Dade County building permits (county ArcGIS open data)
 async function runMiamiDade(run: Run, cfg: any, sourceId: string) {
   const base = cfg.dataset ?? MD_DATASET;
@@ -323,6 +390,7 @@ async function runMiamiDade(run: Run, cfg: any, sourceId: string) {
   }
   const groups = groupMiamiDade(permits).filter(g => g.some(x => (x.processed || '') >= since));
   const keep = groups.filter(g => miamiDadeWanted(g, cfg));
+  await retire(run, groups.filter(g => !miamiDadeWanted(g, cfg)).map(g => `mdc:${g[0].master || g[0].number}`));
   run.note(`${permits.length} commercial building permits since ${since} (with ${masters.length} master permits), ${groups.length} jobs, ${keep.length} kept`);
   keep.sort((a, b) => (mdValue(b) || 0) - (mdValue(a) || 0));
   const maxNew = cfg.max_new_per_run ?? 40;
@@ -477,6 +545,7 @@ async function runSource(source: string, trigger: string, user: string | null, a
     else if (source === 'sam_gov') await runSam(run, cfg);
     else if (source === 'usaspending_awards') await runUsaspending(run, cfg);
     else if (source === 'miamidade_permits') await runMiamiDade(run, cfg, source);
+    else if (source === 'fdot_bidtabs') await runBidTabs(run, cfg, source);
     else if (source.endsWith('_permits')) await runPermits(run, cfg, source);
     else if (source === 'orlando_planning') await runOrlandoPlanning(run, cfg, source);
     else if (source === 'orange_dev_cases') await runCountyCases(run, cfg, source);
@@ -635,7 +704,7 @@ Deno.serve(async (req) => {
     if (source === 'retry_failed') return retryFailed();
     if (source === 'verify') return verifyProjects((body.projects || []).map(String), auth.user);
     if (source === 'maintenance') return db.rpc('daily_maintenance');
-    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales', 'miamidade_permits'] : [source];
+    const list = source === 'all' ? ['fdot_lettings', 'sam_gov', 'usaspending_awards', 'orlando_permits', 'orlando_planning', 'orange_dev_cases', 'orange_land_sales', 'miamidade_permits', 'fdot_bidtabs'] : [source];
     const out = [];
     for (const s of list) out.push(await runSource(s, trigger, auth.user));
     return out;

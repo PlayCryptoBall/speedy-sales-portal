@@ -1,5 +1,5 @@
 // Pure parsing and mapping helpers for the refresh job (no Deno or network APIs, so they can be unit tested).
-import { DEFAULT_TERMS, type Term } from './terms.ts';
+import { DEFAULT_TERMS, SVC, type Term } from './terms.ts';
 
 export const REGION_BY_COUNTY: Record<string, string> = {};
 // Six sales regions covering all 67 counties (same table as public.fl_counties).
@@ -538,6 +538,95 @@ export function permitPayload(x: Permit, cls: Classification, cfg: { city: strin
   };
 }
 
+// ---------------------------------------------------------------- FDOT bid tabulations (pay items and quantities)
+// Districts and Central Office post a bid tabulation PDF for each contract a week or two after the letting. Its pay items
+// state the work in FDOT's own words with quantities, so a removal or sawing item is documented scope, not inferred.
+export interface BidItem { line: string; item: string; desc: string; qty: number | null; unit: string | null }
+export const bidTabContract = (url: string) => {
+  const m = decodeURIComponent(url).match(/\/([A-Za-z]\d[A-Za-z0-9]{3})(?:-r\d+)?-?bid-?tabs?\.pdf/i);
+  return m ? m[1].toUpperCase() : null;
+};
+export function bidTabLinks(html: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of html.matchAll(/href="([^"]+?\.pdf[^"]*)"/gi)) {
+    const url = m[1].replace(/&amp;/g, '&');
+    const c = bidTabContract(url);
+    if (c && !out.has(c)) out.set(c, url.startsWith('http') ? url : `https://www.fdot.gov${url.startsWith('/') ? '' : '/'}${url}`);
+  }
+  return out;
+}
+const UNITS = 'SY|LF|CY|EA|LS|SF|TN|GM|CF|DA|AC|MB|LB|GA|HR|MO|NM|CM|ED|PI|LO|WK|PH|ME|YR|PM|KF|MG|CD';
+export function parseBidTabItems(text: string): BidItem[] {
+  const t = text.replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+  const start = /(?:^|[\s|])(\d{4})\s*\|?\s*(0\d{3}(?:\d{1,6})?(?![.,\d])(?:\s\d{1,7}(?![.,\d])){0,3})\s/g;
+  const hits = [...t.matchAll(start)];
+  const seen = new Map<string, BidItem>();
+  hits.forEach((h, i) => {
+    const chunk = t.slice(h.index! + h[0].length, i + 1 < hits.length ? hits[i + 1].index : h.index! + h[0].length + 400).slice(0, 400);
+    const q = chunk.match(/\(?(\d{1,3}(?:,\d{3})*\.\d{3})\)?(?!\d)/);
+    const u = chunk.match(new RegExp(`(?:^|[\\s|(])(${UNITS})(?:\\s*\\(LS\\))?(?=[\\s|]|$)`));
+    const desc = chunk.split(/\s(?:\d{1,3}(?:,\d{3})*\.\d{2,5})(?!\d)/)[0]                    // stop at the first price or amount
+      .replace(/\(?\d{1,3}(?:,\d{3})*\.\d{3}\)?/g, ' ').replace(new RegExp(`(?:^|\\s)(?:${UNITS})(?:\\s*\\(LS\\))?(?=\\s|$)`, 'g'), ' ')
+      .replace(/\b\d{11}\b/g, ' ').replace(/\|/g, ' ').replace(/\b(?:SECTION|Section Totals|Contract Grand Totals)\b.*$/i, '').replace(/\s+/g, ' ').trim();
+    const key = `${h[1]}|${h[2].replace(/\s/g, '')}`;
+    if (!desc || !/[A-Z]{3}/.test(desc) || seen.has(key)) return;
+    const lumpSum = q ? /^\(/.test(q[0]) : false;
+    seen.set(key, { line: h[1], item: h[2].replace(/\s+/g, ' '), desc: desc.slice(0, 140), qty: q ? Number(q[1].replace(/,/g, '')) : null, unit: lumpSum ? 'LS' : (u ? u[1] : null) });
+  });
+  return [...seen.values()];
+}
+// Pay items that are Speedy's work. Pavement markings, signs, asphalt milling and rumble strips are not.
+const BID_ITEM_TERMS: { label: string; re: RegExp; services: string[] }[] = [
+  { label: 'bridge or structure removal', re: /\bREMOV\w* (?:OF )?(?:EXISTING )?(?:STRUCTURES?|BRIDGES?|BRIDGE DECK|DECK|FENDER|PIER|BULKHEAD|SEAWALL|RETAINING WALL|BOX CULVERT|CULVERT|HEADWALL|ENDWALL)|\b(?:BRIDGE|STRUCTURE|DECK|FENDER SYSTEM) (?:REMOVAL|DEMOLITION)/, services: [SVC.RB, SVC.WI, SVC.WS, SVC.BR] },
+  { label: 'concrete removal', re: /\bREMOV\w* (?:OF )?(?:EXISTING )?(?:CONCRETE|BARRIER|TRAFFIC RAILING|PARAPET|SIDEWALK|CURB|SLAB|CONC\b|RIGID PAVEMENT|PAVEMENT\b(?! MARK))|\b(?:CONCRETE|SLAB|BARRIER WALL|SIDEWALK|CURB|RIGID PAVEMENT) (?:REMOVAL|DEMOLITION)/, services: [SVC.BR, SVC.SS, SVC.WS] },
+  { label: 'saw cutting', re: /\bSAW ?CUT\w*|\bSAWING\b/, services: [SVC.SS, SVC.WS, SVC.CU] },
+  { label: 'core drilling', re: /\bCOR(?:E|ING)\b(?! BORING)|\bDRILL(?:ED|ING)? (?:AND|&) (?:GROUT|EPOXY)|\bDOWEL\w* (?:BARS? )?(?:INTO|IN) EXISTING|\bANCHOR\w* (?:INTO|IN) EXISTING/, services: [SVC.CD] },
+  { label: 'concrete pavement grinding', re: /\bGRINDING CONCRETE PAVEMENT|\bDIAMOND GRIND\w*|\bPLANING\b|\bBRIDGE DECK GROOV\w*|\bGROOVING AND PLANING/, services: [SVC.DG, SVC.SP] },
+  { label: 'concrete slab or pavement repair', re: /\bSLAB REPLACEMENT|\bCONCRETE PAVEMENT (?:SLAB )?(?:REPAIR|REPLACEMENT|REHAB)|\bPARTIAL DEPTH (?:SPALL )?REPAIR|\bSPALL REPAIR|\bFULL DEPTH REPAIR/, services: [SVC.SS, SVC.BR, SVC.DG] },
+  { label: 'expansion joint work', re: /\bEXPANSION JOINT|\bBRIDGE DECK EXPANSION|\bJOINT (?:REPLACEMENT|REHAB)/, services: [SVC.SS, SVC.WS] },
+  { label: 'structural concrete repair', re: /\bEPOXY INJECTION|\bCONCRETE REPAIR|\bCONCRETE STRUCTURE REPAIR|\bPILE JACKET|\bCRACK REPAIR/, services: [SVC.SS, SVC.CD, SVC.GPR] },
+];
+const fmtQty = (x: BidItem) => x.qty == null ? '' : x.unit === 'LS' ? 'lump sum' : `${x.qty.toLocaleString('en-US', { maximumFractionDigits: 3 })} ${x.unit || ''}`.trim();
+export function speedyBidItems(items: BidItem[]) {
+  const out: (BidItem & { label: string; services: string[] })[] = [];
+  for (const x of items) {
+    if (/\b(PAVEMENT MARK|TAPE|THERMOPLASTIC|PAINT|SIGN|MILLING EXISTING ASPHALT|RUMBLE|LITTER|MOWING|TREE|VEGETATION|STRIPING|DEBRIS)\b/.test(x.desc)) continue;
+    const t = BID_ITEM_TERMS.find(b => b.re.test(x.desc));
+    if (t) out.push({ ...x, label: t.label, services: t.services });
+  }
+  return out;
+}
+export function bidTabEvidence(contract: string, url: string, items: BidItem[]): Evidence[] {
+  const byLabel = new Map<string, (BidItem & { label: string; services: string[] })[]>();
+  for (const x of speedyBidItems(items)) { if (!byLabel.has(x.label)) byLabel.set(x.label, []); byLabel.get(x.label)!.push(x); }
+  return [...byLabel.entries()].map(([label, xs]) => ({
+    term: `bid item: ${label}`, kind: 'direct', confidence: 'documented', field: 'bid item', doc: `FDOT bid tabulation, contract ${contract}`, url, page: null,
+    snippet: xs.slice(0, 4).map(x => `${x.item} ${x.desc}${fmtQty(x) ? ` (${fmtQty(x)})` : ''}`).join('; ').slice(0, 400),
+    services: [...new Set(xs.flatMap(x => x.services))],
+  }));
+}
+export const bidTabScope = (text: string) => {
+  const m = text.replace(/\s+/g, ' ').match(/The Improvements under this Contract consist of (.{20,600}?)(?:\.\s|$)/i);
+  return m ? m[1].replace(/\s+/g, ' ').trim() : null;
+};
+export function bidTabPayload(key: string, contract: string, url: string, text: string, items: BidItem[], terms: Term[] = DEFAULT_TERMS) {
+  const ev = bidTabEvidence(contract, url, items);
+  const scope = bidTabScope(text);
+  const cls = scope ? classify([{ field: 'contract scope', text: scope, doc: `FDOT bid tabulation, contract ${contract}`, url }], terms) : null;
+  const evidence = [...ev, ...(cls?.evidence || [])];
+  const services = [...new Set(evidence.flatMap(e => e.services))];
+  const sp = speedyBidItems(items);
+  const p: Record<string, unknown> = {
+    external_key: key, source_id: 'fdot_lettings',
+    size_note: sp.length ? `Bid items: ${sp.slice(0, 3).map(x => `${x.desc.toLowerCase()}${fmtQty(x) ? ` ${fmtQty(x)}` : ''}`).join('; ')}`.slice(0, 300) : null,
+    services_likely: services, evidence,
+  };
+  if (ev.length) { p.relevance = 'high'; p.relevance_score = 3 * ev.length; p.review_reason = 'FDOT pay items name Speedy work: ' + ev.map(e => e.term.replace('bid item: ', '')).join(', '); }
+  else if (cls && cls.relevance !== 'low') { p.relevance = cls.relevance; p.relevance_score = cls.score; }
+  if (scope) p.source_summary = `Contract scope (bid tabulation): ${scope}`.slice(0, 600);
+  return { payload: p, matched: sp, scope };
+}
+
 // ---------------------------------------------------------------- Miami-Dade County building permits (ArcGIS open data)
 // Each trade (roofing, windows, pool) pulls its own permit under the building's master permit and repeats the master's value,
 // so permits are grouped by master number, the value is the largest one (never a sum), and the builder comes from the master.
@@ -552,6 +641,7 @@ const MD_SKIP = /\b(pools?|swimming|re-?roof\w*|roof\w*|tents?|short term event|
 const MD_ABBR: [RegExp, string][] = [[/\bINT\b/g, 'interior'], [/\bALT\b/g, 'alteration'], [/\bRENO\b/g, 'renovation'], [/\bDEM\b|\bDEMO\b/g, 'demolition'],
   [/\bBLDG\b|\bBUILD\b(?!\s*OUT)/g, 'building'], [/\bRPL\b/g, 'replace'], [/\bMULT FAM\b/g, 'multifamily'], [/\bCONST\b/g, 'construction'], [/\bADD\b/g, 'addition'],
   [/\bREMODE?\b/g, 'remodel'], [/\bSTA\b/g, 'stations'], [/\bEXT\b/g, 'extension'], [/\bCUR WALL\b/g, 'curtain wall'], [/\bWNDW\b/g, 'window'], [/\bSTRFT\b/g, 'storefront']];
+const MD_UNIT = /\b(?:ST|AVE|BLVD|RD|DR|CT|TER|PL|WAY|LN|CIR|PKWY|HWY|TRL|PATH|CSWY|DRIVE|STREET|AVENUE)\b\s+#?[A-Z]?-?\d+[A-Z]?$/i;
 export const mdExpand = (s: string) => MD_ABBR.reduce((t, [re, w]) => t.replace(re, w), (s || '').toUpperCase()).replace(/\s+/g, ' ').trim();
 const mdDate = (v: any) => {
   if (v == null || v === '') return null;
@@ -589,6 +679,8 @@ export const mdValue = (group: MdPermit[]) => Math.max(0, ...group.map(g => g.va
 export function miamiDadeWanted(group: MdPermit[], cfg: { min_value?: number; min_demo_value?: number } = {}): boolean {
   const lead = mdLead(group), v = mdValue(group) || 0;
   if (!lead.number || /^(CONDO\/APT INDIVIDUAL UNIT|SINGLE FAMILY|DUPLEX|SHORT TERM EVENT|TENT)/i.test(lead.use)) return false;
+  // one apartment or condo unit in a residential building (a unit number after the street name)
+  if (/units?|residential|condo|apt/i.test(lead.use) && MD_UNIT.test(lead.address)) return false;
   const min = /^Demol/.test(lead.worktype) ? (cfg.min_demo_value ?? 50_000) : (cfg.min_value ?? 250_000);
   if (v < min) return false;
   // every permit in the group is a trade job with no structural work described (a re-roof, a pool, windows)
@@ -612,10 +704,13 @@ export function miamiDadePayload(group: MdPermit[], cls: Classification, cfg: { 
   const x = mdLead(group), key = x.master || x.number;
   const url = mdPermitUrl(x.number), total = mdValue(group);
   const stage = x.issued ? 'preconstruction' : 'permitting';
-  const work = /^Alt/.test(x.worktype) ? 'alteration' : /^Add/.test(x.worktype) ? 'addition' : /^Demo/.test(x.worktype) ? 'demolition' : /^Repair/.test(x.worktype) ? 'repair' : 'new building';
   const what = mdExpand(x.detail);
+  const work = /^Alt/.test(x.worktype) ? 'alteration' : /^Add/.test(x.worktype) ? 'addition' : /^Demo/.test(x.worktype) ? 'demolition'
+    : /^Repair/.test(x.worktype) || /\b(repairs?|restor\w*)\b/i.test(what) ? 'repair' : 'new building';
   const place = titleCase(x.address.replace(/\s{2,}.*$/, ''));
-  const name = what ? `${titleCase(what.toLowerCase())}` : `Commercial ${work}`;
+  const useLabel = x.use ? x.use.toLowerCase().replace(/\s*\/.*$/, '').replace(/\s+-\s+.*$/, '') : '';
+  const name = what && what.split(' ').length >= 2 ? titleCase(what.toLowerCase())
+    : what ? `${titleCase(what.toLowerCase())}${useLabel ? `, ${useLabel}` : ''}` : `Commercial ${work}${useLabel ? `, ${useLabel}` : ''}`;
   const more = group.length > 1 ? ` (${group.length} permits)` : '';
   const title = `${name} (${work}, ${place})${more}`.slice(0, 160);
   const gcPermit = group.find(g => mdBuilder(g));

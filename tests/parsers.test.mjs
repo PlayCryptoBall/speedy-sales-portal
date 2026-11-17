@@ -387,6 +387,8 @@ await t('Miami-Dade permits: grouped by master permit, builder from the master, 
   assert.equal(want('2027000005'), false, 'under $250,000');
   assert.equal(want('2027000006'), true, 'demolition from $50,000');
   assert.equal(want('2027000007'), false, 'a single condo unit');
+  assert.equal(L.miamiDadeWanted([rec({ PermitNumber: '2027000008', ProposedUseDescription: '5 UNITS OR MORE  - RESIDENTIAL', PropertyAddress: '3801 NE 207 ST 1702', EstimatedValue: '394654' })], { min_value: 250000 }), false, 'one unit in a condo tower');
+  assert.equal(L.miamiDadeWanted([rec({ PermitNumber: '2027000009', ProposedUseDescription: '5 UNITS OR MORE  - RESIDENTIAL', PropertyAddress: '1200 BRICKELL AVE', DetailDescriptionComments: 'CONCRETE RESTORATION', ApplicationTypeDescription: 'REPAIR' })]), true, 'building-wide work on an apartment building');
   const cls = L.classify(L.miamiDadeSections(job));
   assert.notEqual(cls.relevance, 'low');
   const p = L.miamiDadePayload(job, cls, { source_id: 'miamidade_permits' });
