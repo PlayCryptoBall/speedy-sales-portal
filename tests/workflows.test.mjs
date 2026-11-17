@@ -807,6 +807,8 @@ await test('Duplicates: same awardee across sources is suggested, a manager merg
     await svc.rpc('refresh_upsert_project', { p_run: run, p: { ...base, external_key: k, source_id: 'fdot_lettings', title: t, solicitation_no: k.slice(4).toUpperCase(),
       winner: { name: 'Dup Paving Co', status: 'low_bidder', as_of: today }, opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: t } } });
   assert.equal((await m.rpc('duplicate_candidates')).filter(x => /DUPF/.test(x.a.title + x.b.title)).length, 0);
+  // records with no contractor are never paired as "same contractor"
+  assert.ok((await m.rpc('duplicate_candidates')).every(x => x.reason && !/Same contractor \(\)/.test(x.reason)));
   assert.equal((await m.rpc('duplicate_candidates')).filter(x => /phase 2/.test(x.a.title + x.b.title)).length, 0);
 });
 
