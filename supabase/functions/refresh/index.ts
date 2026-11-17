@@ -351,6 +351,10 @@ async function runBidTabs(run: Run, cfg: any, sourceId: string) {
       run.note(`${c}: ${items.length} pay items, ${matched.length} Speedy items${matched.length ? ': ' + matched.slice(0, 4).map(x => `${x.desc.toLowerCase()} (${fmtQty(x)})`).join('; ') : ''}`);
       const r = await run.upsert(payload);
       if (r) newlyDone.push(c);
+      if (r && matched.length) {
+        const cr = await db.rpc('refresh_clear_review', { p_key: want.get(c)!, p_note: `the FDOT bid tabulation for ${c} lists ${matched.slice(0, 3).map(x => `${x.desc.toLowerCase()} (${fmtQty(x)})`).join('; ')}.` });
+        if (cr.error) run.note(`${c}: review not cleared (${cr.error.message})`); else if (cr.data?.cleared) run.note(`${c}: ${cr.data.cleared} lead(s) cleared from review`);
+      }
     } catch (e) { run.counts.errors++; run.note(`${c}: bid tabulation could not be read (${(e as Error).message})`); }
   }
   if (newlyDone.length) {

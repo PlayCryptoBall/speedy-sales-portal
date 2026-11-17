@@ -705,7 +705,7 @@ export function miamiDadePayload(group: MdPermit[], cls: Classification, cfg: { 
   const x = mdLead(group), key = x.master || x.number;
   const url = mdPermitUrl(x.number), total = mdValue(group);
   const stage = x.issued ? 'preconstruction' : 'permitting';
-  const what = mdExpand(x.detail);
+  const what = mdExpand(x.detail).replace(/[()#]+/g, ' ').replace(/\s+/g, ' ').trim();
   const work = /^Alt/.test(x.worktype) ? 'alteration' : /^Add/.test(x.worktype) ? 'addition' : /^Demo/.test(x.worktype) ? 'demolition'
     : /^Repair/.test(x.worktype) || /\b(repairs?|restor\w*)\b/i.test(what) ? 'repair' : 'new building';
   const place = titleCase(x.address.replace(/\s{2,}.*$/, ''));

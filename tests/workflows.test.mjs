@@ -909,6 +909,29 @@ await test('Missed-opportunity check explains whether a project is in the pipeli
   await b.fails('check_missed', { p_input: 'https://sam.gov/opp/x' }, /manager_only/);
 });
 
+await test('Documented scope clears a discovery review; duplicate reviews stay; agents cannot call it', async () => {
+  const id = await run('fdot_lettings');
+  const mkp = (k, extra = {}) => svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: k, source_id: 'fdot_lettings', title: 'Example contract ' + k, county: 'Orange', region: 'Central FL',
+    stage: 'low_bidder', relevance: 'review', opportunity: { kind: 'gov_bid', approach: 'track_award', title: 'Example ' + k }, ...extra } });
+  await mkp('fdot:ZZ001'); await mkp('fdot:ZZ002');
+  const p1 = await proj('fdot:ZZ001'), p2 = await proj('fdot:ZZ002');
+  assert.equal((await oppsOf(p1.id))[0].needs_review, true);
+  let r = await svc.rpc('refresh_clear_review', { p_key: 'fdot:ZZ001', p_note: 'test' });
+  assert.equal(r.reason, 'no_documented_scope', 'inferred scope is not enough');
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'fdot:ZZ001', source_id: 'fdot_lettings', relevance: 'high', evidence: [{ term: 'bid item: concrete removal', kind: 'direct',
+    confidence: 'documented', field: 'bid item', doc: 'FDOT bid tabulation, contract ZZ001', snippet: '0110 4 10 REMOVAL OF EXISTING CONCRETE (1,000 SY)', services: ['Breaking & removal'] }] } });
+  await admin.query(`update opportunities set review_kind = 'duplicate' where project_id = $1`, [p2.id]);
+  r = await svc.rpc('refresh_clear_review', { p_key: 'fdot:ZZ001', p_note: 'the tabulation lists concrete removal' });
+  assert.equal(r.cleared, 1);
+  const o1 = (await oppsOf(p1.id))[0];
+  assert.equal(o1.needs_review, false);
+  assert.match((await admin.query(`select body from activities where opportunity_id = $1 and kind = 'review' order by created_at desc limit 1`, [o1.id])).rows[0].body, /cleared automatically: the tabulation/);
+  await admin.query(`update projects set evidence = (select evidence from projects where id = $1) where id = $2`, [p1.id, p2.id]);
+  r = await svc.rpc('refresh_clear_review', { p_key: 'fdot:ZZ002', p_note: 'x' });
+  assert.equal(r.cleared, 0, 'a duplicate review is a manager decision');
+  await a.fails('refresh_clear_review', { p_key: 'fdot:ZZ001', p_note: 'x' }, /permission denied/);
+});
+
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
