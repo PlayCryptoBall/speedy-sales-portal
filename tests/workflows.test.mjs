@@ -932,6 +932,40 @@ await test('Documented scope clears a discovery review; duplicate reviews stay; 
   await a.fails('refresh_clear_review', { p_key: 'fdot:ZZ001', p_note: 'x' }, /permission denied/);
 });
 
+await test('Workspaces: a private workspace lead is invisible to another user, even by id; switching changes what you see', async () => {
+  const ws = await m.rpc('ensure_personal_workspace');
+  const mine = ws.items.find(w => w.kind === 'personal');
+  assert.ok(mine, 'personal workspace created'); assert.equal(mine.role, 'owner');
+  assert.equal((await m.rpc('ensure_personal_workspace')).items.filter(w => w.kind === 'personal').length, 1, 'idempotent');
+  const shared = ws.items.find(w => w.is_default);
+  await m.rpc('set_workspace', { p_id: mine.id });
+  const r = await m.rpc('add_lead', { p: { project_title: 'Private prospect: example warehouse slab', source_url: 'https://example.com/private/1', company_name: 'Example Private GC', region: 'Central FL', services: ['Slab sawing'] } });
+  assert.equal(r.ok, true);
+  const id = r.id || r.opportunity_id || (await opp(`title like '%example warehouse slab%'`)).id;
+  const row = (await admin.query(`select workspace_id from opportunities where id = $1`, [id])).rows[0];
+  assert.equal(row.workspace_id, mine.id, 'created in the current (private) workspace');
+  assert.ok((await m.rpc('get_board')).some(x => x.id === id), 'owner sees it');
+  // another user, guessing the id
+  await a.fails('get_opportunity', { p_id: id }, /not_found/);
+  await a.fails('log_activity', { p_id: id, p: { kind: 'note', body: 'x' } }, /not_found/);
+  const cl = await a.rpc('claim_opportunity', { p_id: id }).catch(e => ({ error: e.message }));
+  assert.notEqual(cl.ok, true, 'cannot claim it: ' + JSON.stringify(cl));
+  assert.equal((await admin.query('select owner_id from opportunities where id = $1', [id])).rows[0].owner_id, null);
+  assert.ok(!(await a.rpc('get_board')).some(x => x.id === id), 'not on the other user board');
+  await a.fails('set_workspace', { p_id: mine.id }, /not_a_member/);
+  await a.fails('set_workspace_member', { p_ws: mine.id, p_user: A, p_role: 'member' }, /personal_workspace_is_private/);
+  // activity written in the private workspace stays there
+  await m.rpc('log_activity', { p_id: id, p: { kind: 'note', body: 'private note' } });
+  assert.equal((await admin.query(`select count(*)::int n from activities where opportunity_id = $1 and workspace_id = $2`, [id, mine.id])).rows[0].n >= 1, true);
+  // back to the shared workspace: the private lead is out of view for the owner too
+  await m.rpc('set_workspace', { p_id: shared.id });
+  assert.ok(!(await m.rpc('get_board')).some(x => x.id === id));
+  await m.fails('get_opportunity', { p_id: id }, /not_found/);
+  // branding is per workspace and only its managers can change it
+  await a.fails('update_workspace', { p_id: shared.id, p: { branding: { display_name: 'X' } } }, /workspace_manager_only/);
+  const u = await m.rpc('update_workspace', { p_id: mine.id, p: { branding: { display_name: 'Valor Cutting Test' } } });
+  assert.equal(u.items.find(w => w.id === mine.id).branding.display_name, 'Valor Cutting Test');
+});
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -85,6 +85,28 @@
   P.url = (u) => /^https?:\/\//i.test(String(u || '').trim()) ? esc(String(u).trim()) : '#';   // stored links: http(s) only
   P.tel = (p) => 'tel:' + String(p || '').replace(/[^\d+]/g, '').replace(/^(\d{10})$/, '+1$1');
   P.isMgr = () => P.state.me?.role === 'manager';
+  // the current workspace and its branding (company name, logo); nothing about one employer is fixed in the app
+  P.ws = () => { const w = P.state.ws; return w ? (w.items || []).find(x => x.id === w.current) || null : null; };
+  P.brand = () => {
+    const b = P.ws()?.branding || {};
+    const name = b.display_name || P.ws()?.name || 'Sales Portal';
+    return { name, short: b.short_name || name.split(' ')[0], product: b.product_name || 'Sales Portal', logo: b.logo_url || (P.ws()?.is_default ? 'assets/logo-dark.png' : null),
+      mark: b.mark_url || (P.ws()?.is_default ? 'assets/mark-dark.png' : null), personal: P.ws()?.kind === 'personal' };
+  };
+  P.act.pickWorkspace = () => {
+    const w = P.state.ws; if (!w) return;
+    P.dialog({ title: 'Switch workspace', ok: null, cancel: 'Close',
+      body: `<p class="small muted" style="margin-bottom:10px">Each workspace keeps its own leads, notes, contacts and quotes. A private workspace is visible only to you.</p>
+        <div class="ws-list">${w.items.map(x => `<button type="button" class="ws-item" data-act="setWorkspace" data-id="${x.id}" aria-current="${x.id === w.current}">
+          <b>${esc(x.name)}</b><span class="small muted">${x.kind === 'personal' ? 'Private to you' : `Shared, ${x.members} member${x.members === 1 ? '' : 's'}`} · ${x.leads} lead${x.leads === 1 ? '' : 's'}</span></button>`).join('')}</div>` });
+  };
+  P.act.setWorkspace = (el) => P.busy(el, async () => {
+    P.state.ws = await P.rpc('set_workspace', { p_id: el.dataset.id });
+    document.querySelector('dialog[open] [data-x]')?.click();
+    P.state.board = null; P.invalidate?.();
+    P.renderShell(); await P.loadBoard?.(true).catch(() => {}); P.route();
+    P.toast(`Now in ${P.ws()?.name}`);
+  });
   P.initials = (n) => String(n || '?').split(/[^A-Za-z0-9]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
   P.place = (r) => [r.city || (r.county ? r.county + ' County' : ''), r.region && r.region !== 'Unknown' ? r.region : ''].filter(Boolean).join(', ') || 'Location not recorded';
   P.companyOf = (r) => r.company_name || r.project_owner || r.company?.name || r.project?.owner_name || 'No company yet';
@@ -116,6 +138,7 @@
     phone: '<path d="M5 4h3.5l1.8 4.5-2.3 1.4a11 11 0 0 0 6.1 6.1l1.4-2.3L20 15.5V19a1.5 1.5 0 0 1-1.6 1.5C10.6 20 4 13.4 3.5 5.6A1.5 1.5 0 0 1 5 4Z"/>',
     mail: '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="m4 7 8 6 8-6"/>',
     pin: '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/>',
+    lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
     clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
     cal: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
     check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
@@ -447,13 +470,14 @@
   P.TITLES = { today: 'Today', pool: 'Available', mine: 'My pipeline', all: 'All leads', gov: 'Gov contracts', team: 'Team', users: 'People and access',
     sources: 'Sources and refreshes', signals: 'Early signals', companies: 'Companies', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
   P.renderShell = () => {
-    const me = P.state.me, collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
+    const me = P.state.me, br = P.brand(), collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
     const link = ([k, label, icon]) => `<a class="sb-link" href="#/${k}" data-nav="${k}" title="${esc(label)}">${P.icon(icon)}<span class="txt">${esc(label)}</span><span class="sb-count" data-count="${k}"></span></a>`;
     document.getElementById('root').innerHTML = `
       <div class="app ${collapsed ? 'collapsed' : ''}" id="app">
         <a class="sr" href="#view" data-act="skip">Skip to content</a>
         <aside class="sidebar" aria-label="Main navigation">
-          <div class="sb-brand"><img class="full" src="assets/logo-dark.png" alt="Speedy Concrete Cutting"><img class="mark" src="assets/mark-dark.png" alt="Speedy"></div>
+          <div class="sb-brand">${br.logo ? `<img class="full" src="${esc(br.logo)}" alt="${esc(br.name)}">` : `<span class="full brand-txt">${esc(br.name)}</span>`}${br.mark ? `<img class="mark" src="${esc(br.mark)}" alt="${esc(br.short)}">` : `<span class="mark brand-txt">${esc(br.short.slice(0, 2))}</span>`}</div>
+          ${(P.state.ws?.items || []).length > 1 ? `<button type="button" class="sb-ws" data-act="pickWorkspace" title="Switch workspace" aria-label="Workspace: ${esc(P.ws()?.name || '')}. Switch workspace">${P.icon(br.personal ? 'lock' : 'team')}<span class="txt"><span class="small muted">Workspace</span><b>${esc(P.ws()?.name || '')}</b></span></button>` : ''}
           <nav class="sb-nav">${P.NAV().map(([g, items]) => `<div class="sb-group" role="group" aria-label="${esc(g)}"><div class="sb-label">${esc(g)}</div>${items.map(link).join('')}</div>`).join('')}</nav>
           <div class="sb-foot">
             <button class="sb-btn" data-act="notifications" title="Notifications" aria-label="Notifications">${P.icon('bell')}<span class="txt">Notifications</span><span class="badge-n hidden" data-unread></span></button>
@@ -462,7 +486,7 @@
           </div>
         </aside>
         <div class="main">
-          <header class="topbar"><img src="assets/mark-dark.png" alt="Speedy"><div class="ttl" id="ttl">Speedy</div>
+          <header class="topbar">${br.mark ? `<img src="${esc(br.mark)}" alt="${esc(br.short)}">` : ''}<button type="button" class="ttl" id="ttl" data-act="pickWorkspace" aria-label="Switch workspace">${esc(br.short)}</button>
             <button data-act="notifications" aria-label="Notifications">${P.icon('bell')}<span class="badge-n hidden" data-unread></span></button></header>
           <main id="view" class="page" tabindex="-1"></main>
         </div>
@@ -482,7 +506,7 @@
     const b = app.querySelector('.sb-collapse'); b.setAttribute('aria-label', c ? 'Expand sidebar' : 'Collapse sidebar'); b.title = c ? 'Expand sidebar' : 'Collapse sidebar';
   };
   P.setPage = (title) => {
-    document.title = title + ' · Speedy Sales';
+    document.title = `${title} · ${P.brand().short}${P.brand().personal ? ' (private)' : ''}`;
     const t = document.getElementById('ttl'); if (t) t.textContent = title;
   };
   P.pageHead = ({ title, sub = '', actions = '' }) => {

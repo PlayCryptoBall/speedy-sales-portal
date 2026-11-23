@@ -117,6 +117,8 @@
       return;
     }
     P.state.me = me;
+    // workspaces: the shared company workspace plus one private prospecting workspace per person
+    P.state.ws = await P.rpc('ensure_personal_workspace').catch(() => null);
     P.renderShell();
     if (!started) {
       started = true;

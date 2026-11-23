@@ -1,11 +1,12 @@
 #!/bin/bash
 # usage: tests/reset_db.sh <dbname>   (local test Postgres on :54329)
 set -e
+shopt -s nullglob
 export PGPASSWORD=pw
 P="psql -h localhost -p 54329 -U postgres -q -v ON_ERROR_STOP=1"
 $P -c "drop database if exists $1" -c "create database $1" >/dev/null
 cd "$(dirname "$0")/.."
 $P -d $1 -f tests/stub_supabase.sql
-for f in supabase/migrations/00[1-589]*.sql supabase/migrations/01[1346789]*.sql supabase/migrations/02[0-9]*.sql; do  # 006, 007, 010 and 012 need pg_cron, pg_net and Supabase Vault (Supabase only)
+for f in supabase/migrations/00[1-589]*.sql supabase/migrations/01[1346789]*.sql supabase/migrations/02[0-9]*.sql supabase/migrations/03[0-9]*.sql; do  # 006, 007, 010 and 012 need pg_cron, pg_net and Supabase Vault (Supabase only)
    $P -d $1 -f $f; done
 $P -d $1 -f tests/stub_after.sql   # records scheduler calls instead of calling the edge function
