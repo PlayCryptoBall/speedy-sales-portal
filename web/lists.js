@@ -318,7 +318,7 @@
   P.renderList = renderResults;
 
   // ---------------------------------------------------------------- board (stage columns)
-  const CLOSED_COLS = ['nurture', 'won', 'lost', 'disqualified', 'archived'];
+  const CLOSED_COLS = ['nurture', 'won', 'lost', 'disqualified', 'cancelled', 'archived'];
   function boardHtml(rows, key) {
     const f = st(), showClosed = !!f.closedCols;
     const owned = rows.filter(r => r.owner_id);

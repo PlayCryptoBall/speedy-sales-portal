@@ -966,6 +966,77 @@ await test('Workspaces: a private workspace lead is invisible to another user, e
   const u = await m.rpc('update_workspace', { p_id: mine.id, p: { branding: { display_name: 'Valor Cutting Test' } } });
   assert.equal(u.items.find(w => w.id === mine.id).branding.display_name, 'Valor Cutting Test');
 });
+await test('Participants: several bidders on one project stay separate; project value is not repeated per bidder', async () => {
+  const id = await run('fdot_lettings');
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'fdot:ZZB01', source_id: 'fdot_lettings', title: 'Example bridge contract ZZB01',
+    county: 'Orange', region: 'Central FL', stage: 'low_bidder', project_value: 2000000,
+    bidders: [{ name: 'Example Paving Inc', rank: 1, amount: 2000000 }, { name: 'Sample Bridge Co', rank: 2, amount: 2300000 }, { name: 'Test Civil LLC', rank: 3, amount: 2500000 }],
+    winner: { name: 'Example Paving Inc', status: 'low_bidder', as_of: '2026-11-10', amount: 2000000 } } });
+  const p = await proj('fdot:ZZB01');
+  const parts = await a.rpc('project_participants', { p_project: p.id });
+  const bidders = parts.filter(x => x.role === 'bidder');
+  assert.deepEqual(bidders.map(x => x.rank), [1, 2, 3]);
+  assert.equal(parts.filter(x => x.role === 'low_bidder').length, 1, 'the low bidder is its own row next to its bid');
+  assert.equal(parts[0].role, 'low_bidder', 'outcome roles sort first');
+  // the source drops a bidder: kept for history, marked not current; a re-run does not duplicate
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'fdot:ZZB01', source_id: 'fdot_lettings',
+    bidders: [{ name: 'Example Paving Inc', rank: 1, amount: 2000000 }, { name: 'Sample Bridge Co', rank: 2, amount: 2300000 }] } });
+  const again = await a.rpc('project_participants', { p_project: p.id });
+  assert.equal(again.filter(x => x.role === 'bidder').length, 3);
+  assert.equal(again.find(x => x.name === 'Test Civil LLC').current, false);
+  // value lives on the project once, whatever the number of bidder leads
+  assert.equal((await admin.query(`select count(*)::int n from projects where external_key = 'fdot:ZZB01'`)).rows[0].n, 1);
+});
+
+await test('Tasks: a lead next step becomes one task due 9 AM Eastern; completing it needs the next step or a reason', async () => {
+  const o = await opp(`stage = 'available' and not needs_review and workspace_id = (select id from workspaces where is_default)`);
+  await a.rpc('claim_opportunity', { p_id: o.id });
+  await a.rpc('log_activity', { p_id: o.id, p: { kind: 'call', outcome: 'spoke', body: 'Talked to the estimator', next_action: 'Send the core drilling question list', next_action_due: '2026-03-09' } });
+  const tasks = await a.rpc('task_list', { p: { opportunity_id: o.id } });
+  assert.equal(tasks.length, 1, 'one mirrored task');
+  // 2026-03-09 is the day after the DST change: 9 AM EDT is 13:00 UTC (it would be 14:00 in EST)
+  assert.equal(new Date(tasks[0].due_at).toISOString(), '2026-03-09T13:00:00.000Z');
+  await a.rpc('log_activity', { p_id: o.id, p: { kind: 'note', body: 'moved date', next_action_due: '2026-12-01' } });
+  const t2 = await a.rpc('task_list', { p: { opportunity_id: o.id } });
+  assert.equal(t2.length, 1, 'still one task after the date changes');
+  assert.equal(new Date(t2[0].due_at).toISOString(), '2026-12-01T14:00:00.000Z', 'EST in December');
+  await a.fails('complete_task', { p_id: t2[0].id, p: { outcome: 'sent' } }, /next_step_required/);
+  await b.fails('complete_task', { p_id: t2[0].id, p: { outcome: 'x', no_action_reason: 'x' } }, /not_found|not_owner/);
+  await a.rpc('complete_task', { p_id: t2[0].id, p: { outcome: 'Sent the list', next_action: 'Call back about drawings', next_action_due: '2026-12-03' } });
+  const t3 = await a.rpc('task_list', { p: { opportunity_id: o.id } });
+  assert.equal(t3.length, 1); assert.equal(t3[0].title, 'Call back about drawings');
+  const done = await a.rpc('task_list', { p: { opportunity_id: o.id, status: 'done' } });
+  assert.ok(done.some(x => x.title === 'Send the core drilling question list'));
+  assert.ok((await admin.query(`select 1 from activities where opportunity_id = $1 and body like 'Done: Send the core drilling%'`, [o.id])).rowCount);
+  // explicit "nothing scheduled" is allowed and recorded
+  await a.rpc('complete_task', { p_id: t3[0].id, p: { outcome: 'Left message', no_action_reason: 'Waiting for drawings from the GC' } });
+  const row = (await admin.query(`select next_action, no_action_reason from opportunities where id = $1`, [o.id])).rows[0];
+  assert.equal(row.next_action, null); assert.equal(row.no_action_reason, 'Waiting for drawings from the GC');
+  // a standalone task
+  const st = await a.rpc('save_task', { p: { opportunity_id: o.id, kind: 'drawings', title: 'Get the MEP sheets', due_date: '2026-12-02' } });
+  await a.rpc('complete_task', { p_id: st.id, p: { outcome: 'Received' } });
+  // moving to Research is allowed for an owned lead (was blocked by the old ownership rule)
+  await a.rpc('log_activity', { p_id: o.id, p: { kind: 'note', body: 'more research', stage: 'researching' } });
+  assert.equal((await admin.query(`select stage from opportunities where id = $1`, [o.id])).rows[0].stage, 'researching');
+});
+
+await test('Contacts: do-not-contact hides phone and email from task lists; guessed email never shows as verified', async () => {
+  const o = await opp(`owner_id = '${A}' and company_id is not null and stage <> 'archived'`);
+  const c = await a.rpc('save_contact', { p: { opportunity_id: o.id, name: 'Pat Example', phone: '(407) 555-0142', email: 'pat@example.com' } }).catch(e => ({ error: e.message }));
+  const k = (await admin.query(`select * from contacts where name = 'Pat Example' order by created_at desc limit 1`)).rows[0];
+  assert.ok(k, 'contact saved: ' + JSON.stringify(c));
+  await a.rpc('save_contact_details', { p_id: k.id, p: { email_is_guess: true, buying_role: 'estimator' } });
+  await a.fails('save_contact_details', { p_id: k.id, p: { verification: 'published' } }, /bad_verification/);
+  const t = await a.rpc('save_task', { p: { opportunity_id: o.id, contact_id: k.id, kind: 'call', title: 'Call Pat', due_date: '2026-12-04' } });
+  let row = (await a.rpc('task_list', { p: { opportunity_id: o.id } })).find(x => x.id === t.id);
+  assert.equal(row.contact.email, null, 'a guessed email is not offered as a way to reach them');
+  assert.equal(row.contact.phone, '(407) 555-0142');
+  await a.rpc('save_contact_details', { p_id: k.id, p: { do_not_contact: true, do_not_contact_reason: 'Asked not to be called' } });
+  row = (await a.rpc('task_list', { p: { opportunity_id: o.id } })).find(x => x.id === t.id);
+  assert.equal(row.contact.phone, null); assert.equal(row.contact.do_not_contact, true);
+  assert.ok((await admin.query(`select 1 from activities where contact_id = $1 and body = 'Marked do not contact'`, [k.id])).rowCount);
+  await a.rpc('complete_task', { p_id: t.id, p: { status: 'cancelled', outcome: 'Do not contact' } });
+});
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

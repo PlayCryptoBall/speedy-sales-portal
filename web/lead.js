@@ -107,7 +107,7 @@
         { name: 'next_action_due', label: 'Follow up on', type: 'date', value: o.next_action_due || '', quick: true },
       ],
       onOk: async (v) => {
-        const stage = v.quote_status === 'sent' && ['claimed', 'contacted', 'qualified', 'quote_needed'].includes(o.stage) ? 'quote_sent' : null;
+        const stage = v.quote_status === 'sent' && ['claimed', 'researching', 'contact_confirmed', 'contacted', 'qualified', 'drawings_requested', 'site_visit', 'quote_needed', 'quote_prep'].includes(o.stage) ? 'quote_sent' : null;
         const r = await P.rpc('log_activity', { p_id: o.id, p: { kind: 'quote', ...v, quote_amount: v.quote_amount === '' ? null : v.quote_amount, stage, body: `Quote ${P.QUOTE_STATUS[v.quote_status].toLowerCase()}` } });
         if (r.ok === false) throw new Error(r.message);
       } }).then(v => { if (v) reload('Quote updated.'); });
@@ -252,7 +252,7 @@
           <label class="field"><span>Quote status</span><select id="lg_qstatus"><option value="">Not quoted</option>${Object.entries(P.QUOTE_STATUS).map(([k, t]) => `<option value="${k}" ${o.quote_status === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
           <label class="field"><span>Decision expected</span><input type="date" id="lg_qdecide" value="${esc(o.quote_decision_date || '')}"></label>
           <label class="field"><span>Expected work date</span><input type="date" id="lg_work" value="${esc(o.expected_work_date || '')}"></label>
-          <label class="field"><span>Outcome reason</span><input type="text" id="lg_reason" value="${esc(o.outcome_reason || '')}" placeholder="Needed for Won, Lost or Disqualified"></label>
+          <label class="field"><span>Outcome reason</span><input type="text" id="lg_reason" value="${esc(o.outcome_reason || '')}" placeholder="Needed for Awarded (how it was confirmed), Lost, Disqualified or Cancelled"></label>
         </div>
       </details>
       <div class="savebar"><button class="btn primary" data-act="saveLog" id="lg_save">Save call</button><span class="hint" id="lg_hint">${o.stage === 'claimed' ? 'Reaching someone moves this to Contacted. No answer or a voicemail does not.' : ''}</span></div>
@@ -362,7 +362,7 @@
     };
     const label = P.stageLabel(to);
     let done = false;
-    if (['won', 'lost', 'disqualified'].includes(to)) {
+    if (['won', 'lost', 'disqualified', 'cancelled'].includes(to)) {
       done = !!await P.dialog({ title: `Mark as ${label.toLowerCase()}`, ok: `Mark ${label.toLowerCase()}`,
         fields: [{ name: 'reason', label: to === 'won' ? 'What won it' : to === 'lost' ? 'Why it was lost' : 'Why it is not a fit', type: 'textarea', required: true, value: o.outcome_reason || '',
                    placeholder: to === 'won' ? 'Price, relationship, schedule' : to === 'lost' ? 'Went to another cutter, project cancelled, price' : 'Wrong work type, outside our area' },
@@ -476,7 +476,7 @@
         });
       }
     }
-    if (['won', 'lost', 'disqualified'].includes(p.stage) && !p.outcome_reason) { g('lg_more').open = true; g('lg_reason').focus(); throw new Error('Add the outcome reason first.'); }
+    if (['won', 'lost', 'disqualified', 'cancelled'].includes(p.stage) && !p.outcome_reason) { g('lg_more').open = true; g('lg_reason').focus(); throw new Error('Add the outcome reason first.'); }
     if (p.stage === 'follow_up' && !p.next_action_due) { g('lg_due').focus(); throw new Error('Set a follow-up date for the Follow up stage.'); }
     const r = await P.rpc('log_activity', { p_id: cur.id, p });
     if (r.ok === false) throw new Error(r.message);

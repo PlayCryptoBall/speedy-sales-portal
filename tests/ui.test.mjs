@@ -210,8 +210,8 @@ await t('Desktop: claim from the list, then move it across the board with the st
   assert.equal(await card.getAttribute('data-stage'), 'claimed');
   await shot(flipDesk, '05-desktop-board');
   await card.getByRole('button', { name: /^Move / }).click();
-  await flipDesk.getByRole('menuitem', { name: 'Qualified', exact: true }).click();
-  assert.match(await toast(flipDesk, /Moved to Qualified/), /Moved to Qualified/);
+  await flipDesk.getByRole('menuitem', { name: 'Scope discussion', exact: true }).click();
+  assert.match(await toast(flipDesk, /Moved to Scope discussion/), /Moved to Scope discussion/);
   assert.equal((await db.query('select stage from opportunities where id=$1', [boardLead])).rows[0].stage, 'qualified');
   await flipDesk.locator(`[data-drop="qualified"] .bcard[data-lead="${boardLead}"]`).waitFor();
   // Lost needs a reason: the dialog will not save without one

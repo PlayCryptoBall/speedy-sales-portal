@@ -40,8 +40,8 @@
     ['requested_info', 'Requested information'], ['interested', 'Interested'], ['quote_requested', 'Quote requested'], ['not_interested', 'Not interested'], ['wrong_contact', 'Wrong contact']];
   P.OUTCOME_LABEL = Object.fromEntries(P.OUTCOMES.concat([['reached', 'Spoke with them'], ['wrong_number', 'Wrong contact'], ['sent_info', 'Sent info'], ['meeting_set', 'Meeting set']]));
   P.QUOTE_STATUS = { requested: 'Requested', in_progress: 'Being priced', sent: 'Sent', accepted: 'Accepted', declined: 'Declined', no_response: 'No response yet' };
-  P.ACTIVE = ['claimed', 'researching', 'contacted', 'qualified', 'quote_needed', 'quote_sent', 'follow_up'];
-  P.CLOSED = ['won', 'lost', 'disqualified', 'archived'];
+  P.ACTIVE = ['claimed', 'researching', 'contact_confirmed', 'contacted', 'qualified', 'drawings_requested', 'site_visit', 'quote_needed', 'quote_prep', 'quote_sent', 'follow_up'];
+  P.CLOSED = ['won', 'lost', 'disqualified', 'cancelled', 'archived'];
   P.WINNER_STAGES = ['low_bidder', 'intent_to_award', 'awarded', 'preconstruction', 'under_construction'];
 
   // ---------------------------------------------------------------- formatting
@@ -171,7 +171,7 @@
     // lead class and 0-100 score; the explanation is on the lead
     cls: (r) => !r.lead_class ? P.ui.prio(r.priority) : `<span class="badge cls-${r.lead_class.toLowerCase().replace(/ /g, '-')}" title="${esc(r.priority_summary || '')}"><i></i>${esc(r.lead_class)}${r.lead_score != null ? ` <b>${r.lead_score}</b>` : ''}</span>`,
     stage: (k) => {
-      const cls = k === 'available' ? 'accent' : ['quote_needed', 'quote_sent'].includes(k) ? 'accent' : k === 'won' ? 'ok' : ['lost', 'disqualified', 'archived', 'nurture'].includes(k) ? 'later' : 'outline';
+      const cls = k === 'available' ? 'accent' : ['quote_needed', 'quote_prep', 'quote_sent'].includes(k) ? 'accent' : k === 'won' ? 'ok' : ['lost', 'disqualified', 'cancelled', 'archived', 'nurture'].includes(k) ? 'later' : 'outline';
       return `<span class="badge ${cls}">${esc(k === 'available' ? 'Unclaimed' : P.stageLabel(k))}</span>`;
     },
     // follow-up date (date only)
@@ -207,7 +207,7 @@
   const ERR = {
     not_authorized: 'Your account is not active. Ask your manager.', manager_only: 'Only a manager can do this.',
     not_owner: 'Only the owner or a manager can change this lead.', claim_first: 'Claim this lead before logging work on it.',
-    reason_required: 'Add the reason (why it was won, lost or disqualified).', follow_up_date_required: 'Set a follow-up date.',
+    reason_required: 'Add the reason (how it was awarded, or why it was lost, disqualified or cancelled).', next_step_required: 'Set the next step and date, or say why nothing is scheduled.', follow_up_date_required: 'Set a follow-up date.',
     not_found: 'That lead no longer exists or is not visible to you.', use_release: 'Use Release to put a lead back in the pool.',
     'Failed to fetch': 'No connection to the portal. Check your signal and try again.',
   };
