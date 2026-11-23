@@ -718,3 +718,28 @@ textarea.prep { width: 100%; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo,
 .ws-list{display:grid;gap:8px}
 .ws-item{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface, #fff);text-align:left;cursor:pointer;min-height:48px}
 .ws-item[aria-current="true"]{border-color:var(--accent, #1d5fd6);box-shadow:inset 3px 0 0 var(--accent, #1d5fd6)}
+
+/* ---------- work: tasks, quotes, jobs, briefs */
+.wl{list-style:none;margin:0;padding:0}
+.wl li{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.wl li:first-child{border-top:0}
+.wl li.overdue b{color:var(--danger, #b42318)}
+.wl .grow{flex:1;min-width:0}
+.quote{border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px}
+.quote .qhead{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;margin-bottom:6px}
+.tbl.lines td,.tbl.lines th{vertical-align:top}
+.flags{list-style:none;padding:0;margin:8px 0 0}
+.flags li{font-size:13px;padding:4px 8px;border-radius:6px;margin-top:4px;background:var(--amber-bg, #fff7e6)}
+.flags li.block{background:var(--danger-bg, #fdecea)}
+.metricgrid.wide5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+@media (max-width: 640px){.metricgrid.wide5{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.metric{border:1px solid var(--line);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:2px}
+.brief section{margin-bottom:14px}
+.brief h4{display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size:14px}
+.brief ul,.brief ol{margin:0;padding-left:20px}
+pre.draft{white-space:pre-wrap;font:inherit;background:var(--surface-2, #f6f7f9);border:1px solid var(--line);border-radius:8px;padding:10px;margin:0;max-height:260px;overflow:auto}
+.warn-text{color:var(--amber, #9a5b00)}
+.field.inline{display:flex;align-items:center;gap:6px}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width: 900px){.grid2{grid-template-columns:1fr}}
+.checks{list-style:none;padding:0;margin:0 0 8px}

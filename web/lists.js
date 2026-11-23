@@ -565,6 +565,7 @@
         <div class="stack">
           ${mgr && !my.length ? card('sec-team', 'Team workload', null, teamBody, viewAll('#/team?tab=people', 'Team')) : card('sec-calls', "Today's call list", queueCount, callsBody, my.length ? viewAll('#/mine?sort=urgency', 'My pipeline') : '')}
           ${deadlines.length ? card('sec-dl', 'Upcoming deadlines', deadlines.length, dlBody, viewAll('#/gov?tab=open', 'Gov contracts')) : ''}
+          ${attnBody(P.state.queue)}
         </div>
         <div class="stack">
           ${mgr && my.length ? card('sec-team', 'Team workload', null, teamBody, viewAll('#/team?tab=people', 'Team')) : ''}
@@ -573,13 +574,24 @@
         </div>
       </div>`;
   }
+  // requests, quotes, handoffs and data problems: each item says why it is here and what to do
+  const ATTN = { request: ['Estimate request', 'quote'], quote: ['Quote', 'dollar'], job: ['Awarded job', 'check'], no_next_step: ['No next step', 'flag'], source: ['Data source', 'alert'] };
+  function attnBody(q) {
+    const items = (q?.items || []).slice(0, 8);
+    if (!items.length) return '';
+    const link = (i) => i.kind === 'request' ? `#/requests?id=${i.id}` : i.kind === 'source' ? '#/sources' : `#/today?lead=${i.opportunity_id}`;
+    const body = `<div>${items.map(i => `<div class="mini"><div class="t"><span class="badge outline">${esc(ATTN[i.kind]?.[0] || i.kind)}</span> <a class="ell" href="${link(i)}" ${i.opportunity_id && i.kind !== 'request' ? `data-lead="${i.opportunity_id}"` : ''}>${esc(i.title)}</a></div>
+      <div class="s">${esc(i.why)}${i.sub ? ' · ' + esc(i.sub) : ''}</div><div class="r"><span class="small">${esc(i.action)}</span></div></div>`).join('')}</div>`;
+    return card('sec-attn', 'Needs attention', q.items.length, body, q.items.length > 8 ? '<a class="btn ghost sm" href="#/tasks">Tasks</a>' : '');
+  }
   P.act.jump = (el) => { const t = document.getElementById(el.dataset.to); t?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }); t?.querySelector('[data-lead]')?.focus({ preventScroll: true }); };
 
   P.views.today = async (view) => {
     P.setPage('Today');
     if (!P.state.board) view.innerHTML = P.loadingPage('Today');
-    const [, notes, brief] = await Promise.all([P.loadBoard(), P.rpc('get_notifications').catch(() => null), P.rpc('my_briefing').catch(() => null)]);
+    const [, notes, brief, queue] = await Promise.all([P.loadBoard(), P.rpc('get_notifications').catch(() => null), P.rpc('my_briefing').catch(() => null), P.rpc('work_queue').catch(() => null)]);
     if (notes) P.state.notes = notes;
+    if (queue) P.state.queue = queue;
     if (brief) P.state.briefing = brief;
     if (P.state.page !== 'today') return;
     renderToday(view);

@@ -3,7 +3,7 @@
   const { esc, ui } = P;
   let cur = null, loadingId = null;
   const QUICK = [[1, 'Tomorrow'], [3, 'In 3 days'], [7, 'Next week'], [14, 'In 2 weeks'], [30, 'In a month']];
-  const TABS = [['overview', 'Overview'], ['activity', 'Activity'], ['contacts', 'Contacts'], ['project', 'Project'], ['source', 'Source and history']];
+  const TABS = [['overview', 'Overview'], ['work', 'Work'], ['activity', 'Activity'], ['contacts', 'Contacts'], ['project', 'Project'], ['source', 'Source and history']];
   const canWork = (o) => o.is_mine || (P.isMgr() && !!o.owner_id);
 
   // ---------------------------------------------------------------- open, reload
@@ -27,7 +27,7 @@
         <div class="dw-body">${P.empty('Could not open this lead', esc(e.message), '<button class="btn" data-act="closeDrawer">Close</button>')}</div>`);
     }
   };
-  const reload = async (msg) => {
+  const reload = P.reloadLead = async (msg) => {
     if (msg) P.toast(msg);
     const id = cur.id;
     await Promise.all([P.showLead(id, { force: true }), P.afterChange()]);
@@ -75,9 +75,10 @@
       meta: `${ui.cls({ lead_class: o.lead_class || o.priority_reasons?.lead_class, lead_score: o.lead_score ?? o.priority_reasons?.lead_score, priority: o.priority, priority_summary: o.priority_reasons?.summary })}<span>${P.icon('pin')}${esc(P.place(p))}</span>${p.stage ? `<span>${esc(P.PSTAGE[p.stage] || p.stage)}</span>` : ''}${dl}`,
     });
     const tabs = `<div class="tabs" role="tablist" aria-label="Lead sections">${TABS.map(([k, t]) => `<button class="tab" role="tab" id="lt_${k}" aria-controls="lp_body" aria-selected="${tab === k}" data-act="leadTab" data-tab="${k}">${esc(t)}${counts[k] ? ` <span class="n">${counts[k]}</span>` : ''}</button>`).join('')}</div>`;
-    const body = { overview, activity, contacts, project, source }[tab](o);
+    const body = { overview, work: () => '<div id="lw_work"></div>', activity, contacts, project, source }[tab](o);
     P.drawer.set(`<div class="dw-head">${head}${ownbar(o)}${tabs}</div><div class="dw-body" id="lp_body" role="tabpanel" aria-labelledby="lt_${tab}">${alerts(o)}${body}</div>`, { keepScroll });
     P.state.log = { kind: 'call', outcome: null };
+    if (tab === 'work') { const w = document.getElementById('lw_work'); if (w) P.workSection(o, w); }
     if (tab === 'project' && o.project?.id) {
       const el = document.getElementById('pp_people'); if (el) P.peopleSection(o.project.id, el);
       const tl = document.getElementById('pp_timeline'); if (tl) timeline(o.project.id, tl);

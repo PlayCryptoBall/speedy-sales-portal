@@ -139,6 +139,7 @@
     mail: '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="m4 7 8 6 8-6"/>',
     pin: '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/>',
     lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
     clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
     cal: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
     check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
@@ -459,16 +460,17 @@
   P.NAV = () => {
     const mgr = P.isMgr();
     return [
-      ['Daily work', [['today', 'Today', 'today']]],
+      ['Daily work', [['today', 'Today', 'today'], ['tasks', 'Tasks', 'check'], ['requests', 'Estimate requests', 'quote']]],
       ['Opportunities', [['pool', 'Available', 'pool'], ['mine', 'My pipeline', 'mine'], ['signals', 'Early signals', 'signal'], ['companies', 'Companies', 'building'], mgr && ['all', 'All leads', 'all']]],
       ['Government', [['gov', 'Gov contracts', 'gov']]],
       mgr && ['Management', [['team', 'Team', 'team'], ['users', 'People and access', 'users']]],
       mgr && ['Data and system', [['sources', 'Sources and refreshes', 'sources']]],
-      ['Reports', [mgr && ['reports', 'Team report', 'flag'], ['files', 'Excel and PDF', 'files']]],
+      ['Reports', [['money', 'Money and commission', 'dollar'], mgr && ['reports', 'Team report', 'flag'], ['files', 'Excel and PDF', 'files']]],
+      ['Workspace', [['settings', 'Workspace settings', 'sliders']]],
     ].filter(Boolean).map(([g, items]) => [g, items.filter(Boolean)]);
   };
   P.TITLES = { today: 'Today', pool: 'Available', mine: 'My pipeline', all: 'All leads', gov: 'Gov contracts', team: 'Team', users: 'People and access',
-    sources: 'Sources and refreshes', signals: 'Early signals', companies: 'Companies', files: 'Excel and PDF', reports: 'Team report', me: 'My account', more: 'More', print: 'Print' };
+    sources: 'Sources and refreshes', signals: 'Early signals', companies: 'Companies', files: 'Excel and PDF', reports: 'Team report', tasks: 'Tasks', requests: 'Estimate requests', money: 'Money and commission', settings: 'Workspace settings', me: 'My account', more: 'More', print: 'Print' };
   P.renderShell = () => {
     const me = P.state.me, br = P.brand(), collapsed = P.store.get('sidebar', innerWidth < 1180 ? 'collapsed' : 'open') === 'collapsed';
     const link = ([k, label, icon]) => `<a class="sb-link" href="#/${k}" data-nav="${k}" title="${esc(label)}">${P.icon(icon)}<span class="txt">${esc(label)}</span><span class="sb-count" data-count="${k}"></span></a>`;

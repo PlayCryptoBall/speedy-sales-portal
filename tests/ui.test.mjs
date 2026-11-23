@@ -504,6 +504,74 @@ await t('Accessibility basics: every visible control has a name; panel traps foc
   }
 });
 
+
+await t('Estimate request to quote: units kept, missing items shown, quote lines flag the customer quantities (desktop and phone)', async () => {
+  await mgr.goto(BASE + '#/requests');
+  await mgr.getByRole('button', { name: 'New request' }).click();
+  await mgr.locator('dialog [name=service]').selectOption('core_drilling');
+  await mgr.getByRole('button', { name: 'Next' }).click();
+  const d = mgr.locator('dialog[open]');
+  await d.locator('[name=company]').fill('Example Plumbing Co');
+  await d.locator('[name=contact_name]').fill('Pat Example'); await d.locator('[name=contact_phone]').fill('(407) 555-0190');
+  await d.locator('[name=address]').fill('200 Example Ave'); await d.locator('[name=city]').fill('Orlando');
+  await d.locator('[name=v_core_count]').fill('8'); await d.locator('[name=u_core_count]').selectOption('ea');
+  await d.locator('[name=v_core_diameter]').fill('3'); await d.locator('[name=u_core_diameter]').selectOption('in');
+  await d.locator('[name=v_core_depth]').fill('10'); await d.locator('[name=u_core_depth]').selectOption('in');
+  await d.locator('[name=c_orientation]').selectOption('floor_down');
+  await mgr.getByRole('button', { name: 'Save request' }).click();
+  await toast(mgr, /Request saved/);
+  const er = (await db.query(`select * from estimate_requests where company_name = 'Example Plumbing Co'`)).rows[0];
+  assert.equal(er.status, 'missing_info');
+  const item = (await db.query(`select normalized from estimate_request_items where request_id = $1`, [er.id])).rows[0];
+  assert.equal(item.normalized.core_diameter.unit, 'in'); assert.equal(item.normalized.core_diameter.value, 3);
+  await mgr.goto(BASE + '#/requests?id=' + er.id);
+  await mgr.getByText('Missing before pricing').waitFor();
+  assert.ok(await mgr.getByText('Requested date').count());
+  await mgr.getByText('not an approved estimate', { exact: false }).first().waitFor();
+  await shot(mgr, '30-desktop-estimate-request');
+  await mgr.getByRole('button', { name: 'Start the quote' }).click();
+  await toast(mgr, /Quote started/);
+  await drawer(mgr).locator('#dw_title').waitFor();
+  await mgr.getByRole('tab', { name: /^Work/ }).click();
+  await mgr.locator('#lw_work .quote').first().waitFor({ timeout: 15000 });
+  assert.ok(await mgr.locator('#lw_work').getByText("customer's quantity").count() >= 1, 'quantities marked as the customer\'s');
+  assert.ok(await mgr.locator('#lw_work .flags').getByText(/customer's quantities/).count());
+  await shot(mgr, '31-desktop-quote-draft');
+  // phone layout of the request
+  const phone = await ctx(M, 'iPhone 13');
+  await phone.goto(BASE + '#/requests?id=' + er.id);
+  await phone.getByText('Missing before pricing').waitFor();
+  assert.ok(await noSideScroll(phone), 'no sideways scrolling on the request page');
+  await shot(phone, '32-phone-estimate-request');
+  await phone.goto(BASE + '#/tasks');
+  await phone.locator('.wl li').first().waitFor();
+  assert.ok(await noSideScroll(phone), 'no sideways scrolling on tasks');
+  await shot(phone, '33-phone-tasks');
+});
+
+await t('Outreach draft, money page and workspace settings', async () => {
+  const o = (await db.query(`select o.id from opportunities o where o.owner_id = $1 and o.stage = any(private.active_stages()) and o.company_id is not null and o.kind <> 'inbound_request' limit 1`, [A.id])).rows[0];
+  if (o) {
+    await flip.goto(BASE + '#/lead/' + o.id); await drawer(flip).locator('#dw_title').waitFor();
+    await flip.getByRole('tab', { name: /^Work/ }).click();
+    await flip.getByRole('button', { name: 'Draft outreach' }).click();
+    await flip.locator('dialog[open] .brief').waitFor();
+    assert.ok(await flip.locator('dialog[open]').getByText('Nothing is sent from here', { exact: false }).count());
+    await shot(flip, '34-phone-outreach-draft');
+    await flip.locator('dialog[open] [data-x]').click();
+  }
+  await mgr.goto(BASE + '#/money');
+  await mgr.getByText('No approved commission agreement is recorded', { exact: false }).waitFor();
+  await shot(mgr, '35-desktop-money');
+  await mgr.goto(BASE + '#/settings');
+  await mgr.locator('h3', { hasText: 'Pricing rules' }).waitFor();
+  assert.ok(await mgr.getByText('No pricing rules', { exact: false }).count(), 'no invented rates');
+  await shot(mgr, '36-desktop-settings');
+  await mgr.goto(BASE + '#/today');
+  await mgr.getByText('Needs attention').waitFor({ timeout: 15000 });
+  await shot(mgr, '37-desktop-today-attention');
+});
+
 await t('No script errors in any session', async () => {
   assert.deepEqual(pageErrors, []);
 });

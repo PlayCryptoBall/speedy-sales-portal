@@ -1352,6 +1352,17 @@ await test('Intake files: only the integration that sent a request can attach to
   assert.equal(er.status, 'ready'); assert.deepEqual(er.missing, []);
   await a.fails('intake_register_file', { p_key: k.key, p_ref: r.ref, p: {} }, /permission denied/);
 });
+await test('Work queue and lead work: every item says why it is shown; another rep sees no quote details', async () => {
+  const q = await m.rpc('work_queue');
+  assert.ok(Array.isArray(q.items));
+  assert.ok(q.items.every(i => i.why && i.action), 'each item has a reason and an action');
+  assert.ok(!q.items.some(i => i.kind === 'request' && /fixture/i.test(i.title)), 'fixtures are not real work');
+  const { opp } = globalThis.__er;
+  const w = await m.rpc('opportunity_work', { p_opportunity: opp });
+  assert.ok(w.quotes.length >= 1 && w.money.awarded === 1940);
+  const wb = await b.rpc('opportunity_work', { p_opportunity: opp });
+  assert.equal(wb.full_access, false); assert.deepEqual(wb.quotes, []); assert.equal(wb.money, null);
+});
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
