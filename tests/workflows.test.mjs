@@ -21,7 +21,7 @@ async function session(uid, role = 'authenticated') {
   c.rpc = async (fn, args = {}) => {
     const keys = Object.keys(args);
     const sql = `select public.${fn}(${keys.map((k, i) => `${k} => $${i + 1}`).join(', ')}) as r`;
-    const vals = keys.map(k => args[k] !== null && typeof args[k] === 'object' && !['p_keys', 'p_ids'].includes(k) ? JSON.stringify(args[k]) : args[k]);
+    const vals = keys.map(k => args[k] !== null && typeof args[k] === 'object' && !['p_keys', 'p_ids', 'p_origins'].includes(k) ? JSON.stringify(args[k]) : args[k]);
     const res = await c.query(sql, vals);
     return res.rows[0].r;
   };
@@ -1329,6 +1329,28 @@ await test('Outreach brief: built from the record, inferred scope asked as a que
   await a.rpc('save_company_account', { p_company: o.company_id, p: { do_not_contact: true, do_not_contact_reason: 'Company policy' } });
   await a.fails('generate_outreach_brief', { p_opportunity: o.id }, /do_not_contact/);
   await b.fails('generate_outreach_brief', { p_opportunity: o.id }, /not_owner/);
+});
+await test('Intake files: only the integration that sent a request can attach to it; a stored photo clears the missing item', async () => {
+  await m.rpc('set_workspace', { p_id: (await m.rpc('my_workspaces')).items.find(w => w.is_default).id });
+  const k = await m.rpc('create_integration', { p_name: 'Estimate app (files test)' });
+  const other = await m.rpc('create_integration', { p_name: 'Another app' });
+  assert.equal((await svc.query(`select public.intake_check_origin($1, null) ok`, [k.key])).rows[0].ok, true, 'server-to-server');
+  assert.equal((await svc.query(`select public.intake_check_origin($1, 'https://evil.example') ok`, [k.key])).rows[0].ok, false);
+  await m.rpc('set_integration_origins', { p_id: k.id, p_origins: ['https://estimates.example.com'] });
+  await m.fails('set_integration_origins', { p_id: k.id, p_origins: ['javascript:alert(1)'] }, /bad_origin/);
+  assert.equal((await svc.query(`select public.intake_check_origin($1, 'https://estimates.example.com') ok`, [k.key])).rows[0].ok, true);
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/estimate_request_core.json', import.meta.url)));
+  fx.idempotency_key = 'files-1';
+  const r = await svc.rpc('intake_estimate_request', { p_key: k.key, p: fx });
+  assert.ok(r.missing.some(x => x.field === 'attachments'));
+  assert.equal((await svc.rpc('intake_register_file', { p_key: other.key, p_ref: r.ref, p: { filename: 'a.jpg', mime: 'image/jpeg', bytes: 10 } })).error, 'unknown_request');
+  assert.equal((await svc.rpc('intake_register_file', { p_key: k.key, p_ref: r.ref, p: { filename: 'a.svg', mime: 'image/svg+xml', bytes: 10 } })).error, 'file_type_not_allowed');
+  const reg = await svc.rpc('intake_register_file', { p_key: k.key, p_ref: r.ref, p: { filename: 'slab.jpg', mime: 'image/jpeg', bytes: 2048 } });
+  assert.equal(reg.ok, true);
+  assert.equal((await svc.rpc('intake_confirm_file', { p_key: k.key, p_revision: reg.revision_id })).ok, true);
+  const er = (await admin.query(`select status, missing from estimate_requests where ref = $1`, [r.ref])).rows[0];
+  assert.equal(er.status, 'ready'); assert.deepEqual(er.missing, []);
+  await a.fails('intake_register_file', { p_key: k.key, p_ref: r.ref, p: {} }, /permission denied/);
 });
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
