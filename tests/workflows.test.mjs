@@ -1252,6 +1252,84 @@ await test('Commission: scenarios without an agreement; traceable owed amounts u
   r = await m.rpc('commission_report', { p: { from: '2027-01-01', to: '2027-12-31' } });
   assert.equal(r.owed, Math.round((500 - 20) * 0.1 * 100) / 100, '10% of half the collected amount (cost is half the job)');
 });
+await test('Documents: only allowed file types and sizes; files stay with the lead owner and the workspace; uploads need a registered path', async () => {
+  const { id: erId, opp } = globalThis.__er;
+  await m.fails('add_document_revision', { p: { estimate_request_id: erId, filename: 'run.exe', mime: 'application/x-msdownload', bytes: 100 } }, /file_type_not_allowed/);
+  await m.fails('add_document_revision', { p: { estimate_request_id: erId, filename: 'big.pdf', mime: 'application/pdf', bytes: 30 * 1024 * 1024 } }, /file_too_large/);
+  const up = await m.rpc('add_document_revision', { p: { estimate_request_id: erId, kind: 'photo', title: 'Level 2 slab', filename: 'slab photo (1).jpg', mime: 'image/jpeg', bytes: 52000,
+    sha256: 'a'.repeat(64) } });
+  assert.match(up.path, new RegExp(`^[0-9a-f-]{36}/${up.document_id}/1-slab_photo_1_.jpg$`), 'path starts with the workspace and has a safe name');
+  assert.equal((await admin.query(`select public.registered_upload($1) ok`, [up.path])).rows[0].ok, false, 'only the uploader may use the path');
+  // the uploader's own check (as the storage rule runs it)
+  assert.equal((await m.query(`select public.registered_upload($1) ok`, [up.path])).rows[0].ok, true);
+  assert.equal((await m.query(`select public.registered_upload($1) ok`, [up.path.replace('/1-', '/9-')])).rows[0].ok, false);
+  assert.equal((await a.query(`select public.can_access_workspace($1) ok`, [up.path.split('/')[0]])).rows[0].ok, true, 'a teammate in the shared workspace');
+  const priv = (await m.rpc('my_workspaces')).items.find(w => w.kind === 'personal');
+  assert.equal((await a.query(`select public.can_access_workspace($1) ok`, [priv.id])).rows[0].ok, false, 'not someone else\'s private workspace');
+  await m.rpc('confirm_document_revision', { p_revision: up.revision_id });   // no storage locally: confirmation records the revision
+  const docs = await m.rpc('list_documents', { p: { estimate_request_id: erId } });
+  assert.equal(docs.length, 1); assert.equal(docs[0].revisions[0].rev_no, 1);
+  const again = await m.rpc('add_document_revision', { p: { document_id: up.document_id, filename: 'slab photo (1).jpg', mime: 'image/jpeg', bytes: 52000, sha256: 'a'.repeat(64) } });
+  assert.equal(again.duplicate, true, 'the same file twice is one revision');
+  const r2 = await m.rpc('add_document_revision', { p: { document_id: up.document_id, filename: 'slab-marked.jpg', mime: 'image/jpeg', bytes: 61000, sha256: 'b'.repeat(64), note: 'Cuts marked' } });
+  assert.equal(r2.rev_no, 2);
+  // a lead document is private to the lead owner and managers
+  const ld = await m.rpc('add_document_revision', { p: { opportunity_id: opp, kind: 'purchase_order', title: 'PO', filename: 'po.pdf', mime: 'application/pdf', bytes: 9000 } });
+  await a.fails('add_document_revision', { p: { document_id: ld.document_id, filename: 'x.pdf', mime: 'application/pdf', bytes: 10 } }, /not_owner/);
+  await a.fails('list_documents', { p: { opportunity_id: opp } }, /not_found/);
+});
+
+await test('Outreach brief: built from the record, inferred scope asked as a question, documented scope cited, do-not-contact refused, never sent', async () => {
+  // a discovery lead with a bidder role and inferred scope
+  const id = await run('fdot_lettings');
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'fdot:ZZO01', source_id: 'fdot_lettings', title: 'Example interchange contract ZZO01', short_title: 'Example interchange',
+    county: 'Orange', city: 'Orlando', region: 'Central FL', stage: 'low_bidder', relevance: 'potential', services_likely: ['Slab sawing', 'Core drilling'],
+    winner: { name: 'Example Roadbuilders Inc', status: 'low_bidder', as_of: '2026-11-10', amount: 3100000 },
+    evidence: [{ term: 'bridge replacement', kind: 'indicator', confidence: 'inferred', field: 'title', doc: 'FDOT letting results', snippet: 'bridge replacement', services: ['Slab sawing'] }],
+    opportunity: { kind: 'contractor_outreach', approach: 'approach_prime', title: 'Example Roadbuilders Inc — Example interchange', company_name: 'Example Roadbuilders Inc' } } });
+  const pr = await proj('fdot:ZZO01');
+  const o = (await oppsOf(pr.id)).find(x => x.kind === 'contractor_outreach');
+  await admin.query(`update opportunities set needs_review = false, review_kind = null where id = $1`, [o.id]);
+  await a.rpc('claim_opportunity', { p_id: o.id });
+  await a.rpc('save_contact', { p: { opportunity_id: o.id, name: 'Robin Example', title: 'Chief estimator', phone: '(407) 555-0177' } });
+  const k = (await admin.query(`select id from contacts where name = 'Robin Example'`)).rows[0];
+  await a.rpc('save_contact_details', { p_id: k.id, p: { buying_role: 'estimator' } });
+  let b1 = await a.rpc('generate_outreach_brief', { p_opportunity: o.id });
+  assert.equal(b1.contact.name, 'Robin Example'); assert.match(b1.why_this_contact, /Estimators collect sub prices/);
+  assert.equal(b1.scope_confidence, 'inferred');
+  assert.equal(b1.questions[0], 'Is there any slab sawing or core drilling on this job?', 'inferred scope is a question');
+  assert.ok(!b1.questions.some(q => /trench/.test(q)), 'only the services the record points to');
+  assert.match(b1.opener, /came in low on Example interchange/);
+  assert.match(b1.facts.join(' '), /listed as low bidder at \$3\.1M/);
+  assert.match(b1.facts.join(' '), /Orlando, Orange County/);
+  assert.ok(!/insur|certif|crew|years|our past|we have worked/i.test(b1.email), 'no invented claims');
+  assert.match(b1.email, /Speedy Concrete Cutting/, 'company name from the workspace branding');
+  assert.match(b1.note, /Nothing is sent/);
+  assert.equal(b1.follow_up, null, 'no follow-up draft before any contact');
+  // after a call, the follow-up draft refers to it
+  await a.rpc('log_activity', { p_id: o.id, p: { kind: 'call', outcome: 'voicemail', contact_id: k.id, body: 'Left voicemail' } });
+  const b2 = await a.rpc('generate_outreach_brief', { p_opportunity: o.id });
+  assert.match(b2.follow_up, /from my call on/); assert.match(b2.next_step, /Try again in two business days/);
+  // documented scope (a bid item) is cited with its document
+  await svc.rpc('refresh_upsert_project', { p_run: id, p: { external_key: 'fdot:ZZO01', source_id: 'fdot_lettings', relevance: 'high',
+    evidence: [{ term: 'bid item: concrete removal', kind: 'direct', confidence: 'documented', field: 'bid item', doc: 'FDOT bid tabulation, contract ZZO01', page: 3,
+      snippet: '0110 4 10 REMOVAL OF EXISTING CONCRETE (1,200 SY)', services: ['Breaking & removal'] }] } });
+  const b3 = await a.rpc('generate_outreach_brief', { p_opportunity: o.id });
+  assert.equal(b3.scope_confidence, 'documented');
+  assert.match(b3.scope, /FDOT bid tabulation, contract ZZO01 \(page 3\) lists concrete removal/);
+  // copying is recorded; nothing sends
+  await a.rpc('mark_outreach_draft', { p_id: b3.id, p_status: 'copied' });
+  assert.ok((await admin.query(`select 1 from activities where opportunity_id = $1 and body like 'Copied an outreach draft%'`, [o.id])).rowCount);
+  await b.fails('mark_outreach_draft', { p_id: b3.id, p_status: 'copied' }, /not_found/);
+  // do not contact stops drafting
+  await a.rpc('save_contact_details', { p_id: k.id, p: { do_not_contact: true, do_not_contact_reason: 'Asked to stop' } });
+  await a.fails('generate_outreach_brief', { p_opportunity: o.id, p: { contact_id: k.id } }, /do_not_contact/);
+  const b4 = await a.rpc('generate_outreach_brief', { p_opportunity: o.id });
+  assert.equal(b4.contact, null, 'with the only contact suppressed, the brief says to find one');
+  await a.rpc('save_company_account', { p_company: o.company_id, p: { do_not_contact: true, do_not_contact_reason: 'Company policy' } });
+  await a.fails('generate_outreach_brief', { p_opportunity: o.id }, /do_not_contact/);
+  await b.fails('generate_outreach_brief', { p_opportunity: o.id }, /not_owner/);
+});
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
