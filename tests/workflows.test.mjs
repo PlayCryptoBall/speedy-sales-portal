@@ -1167,6 +1167,91 @@ await test('Quote sent needs a quote: the quick amount path records a version; n
   const v = (await admin.query(`select v.* from quote_versions v join quotes q on q.id = v.quote_id where q.opportunity_id = $1`, [o.id])).rows;
   assert.equal(v.length, 1); assert.equal(v[0].status, 'sent'); assert.equal(Number(v[0].quick_amount), 4200);
 });
+await test('Award: needs how it was confirmed; awarding is not payment; job is scheduled only with confirmation; handoff carries the accepted scope', async () => {
+  const { quote, v1, opp: oppId } = globalThis.__q;
+  const q = await m.rpc('get_quote', { p_id: quote });
+  const draft = q.versions.find(v => v.status === 'draft');
+  await m.fails('record_award', { p_opportunity: oppId, p: { quote_version_id: v1 } }, /confirmation_required/);
+  await m.fails('record_award', { p_opportunity: oppId, p: { method: 'purchase_order', quote_version_id: draft.id } }, /version_not_sent/);
+  const r = await m.rpc('record_award', { p_opportunity: oppId, p: { method: 'purchase_order', reference: 'PO-EXAMPLE-77', quote_version_id: v1, confirmed_on: '2026-11-20' } });
+  const o = (await admin.query(`select stage, quote_status from opportunities where id = $1`, [oppId])).rows[0];
+  assert.equal(o.stage, 'won'); assert.equal(o.quote_status, 'accepted');
+  const vs = (await m.rpc('get_quote', { p_id: quote })).versions;
+  assert.equal(vs.find(v => v.id === v1).status, 'accepted'); assert.equal(vs.find(v => v.id === draft.id).status, 'superseded');
+  let money = await m.rpc('money_summary', { p_opportunity: oppId });
+  assert.equal(money.awarded, 1940); assert.equal(money.collected, null, 'an award is not money collected'); assert.equal(money.invoiced, null);
+  let job = await m.rpc('get_job', { p_id: r.job_id });
+  assert.equal(job.status, 'ready_for_scheduling');
+  const h = job.handoff;
+  assert.equal(h.accepted_scope.version_no, 1); assert.equal(h.accepted_scope.total, 1940);
+  assert.equal(h.site.working_hours, 'nights'); assert.equal(h.site.site_contact.name, 'Lee Super');
+  assert.ok(h.unresolved.some(x => /Photos or drawings/.test(x)), 'open questions travel with the handoff');
+  assert.match(h.scheduling.note, /nothing here books a crew/);
+  await m.fails('update_job', { p_id: r.job_id, p: { status: 'scheduled', scheduled_start: '2026-12-14' } }, /schedule_confirmation_required/);
+  job = await m.rpc('update_job', { p_id: r.job_id, p: { handoff_reviewed: true } });
+  assert.ok(job.handoff_reviewed_at);
+  job = await m.rpc('update_job', { p_id: r.job_id, p: { status: 'scheduled', scheduled_start: '2026-12-14', schedule_source: 'Dispatch (example)' } });
+  assert.equal(job.scheduled_start, '2026-12-14');
+  await a.fails('get_job', { p_id: r.job_id }, /not_owner|not_found/);
+  job = await m.rpc('update_job', { p_id: r.job_id, p: { status: 'completed', completed_on: '2026-12-15' } });
+  assert.equal(job.follow_up_on, '2027-02-13', 'repeat-business check-in 60 days later');
+  assert.ok((await admin.query(`select 1 from tasks where dedupe_key = $1 and status = 'open'`, ['repeat:' + r.job_id])).rowCount);
+  // invoice and a partial payment, then a credit: each total from its own records
+  job = await m.rpc('save_invoice', { p_job: r.job_id, p: { number: 'INV-EX-1', amount: 1940, issued_on: '2026-12-16', due_on: '2027-01-15' } });
+  const inv = job.invoices[0];
+  await m.rpc('record_payment', { p_invoice: inv.id, p: { amount: 1000, received_on: '2027-01-05', method: 'check', reference: '1042' } });
+  job = await m.rpc('record_payment', { p_invoice: inv.id, p: { amount: -40, received_on: '2027-01-06', method: 'credit', reference: 'short pay' } });
+  assert.equal(job.invoices[0].paid, 960); assert.equal(job.invoices[0].balance, 980);
+  money = await m.rpc('money_summary', { p_opportunity: oppId });
+  assert.deepEqual([money.quoted, money.awarded, money.completed, money.invoiced, money.collected], [1940, 1940, 1940, 1940, 960]);
+  assert.deepEqual(money.warnings, []);
+  // attribution was filled in from who did what
+  assert.deepEqual(money.attribution.map(x => x.role).sort(), ['closed', 'developed', 'quoted', 'sourced']);
+  globalThis.__award = { opp: oppId, job: r.job_id, invoice: inv.id };
+});
+
+await test('Awarded from the board still records an award; no reason, no move', async () => {
+  const o = await opp(`owner_id = '${B}' and stage = 'quote_sent'`);
+  await b.fails('log_activity', { p_id: o.id, p: { kind: 'note', body: 'won', stage: 'won' } }, /reason_required/);
+  await b.rpc('log_activity', { p_id: o.id, p: { kind: 'note', body: 'won', stage: 'won', outcome_reason: 'GC emailed the award' } });
+  const aw = (await admin.query(`select * from awards where opportunity_id = $1`, [o.id])).rows;
+  assert.equal(aw.length, 1); assert.equal(aw[0].method, 'recorded'); assert.equal(aw[0].note, 'GC emailed the award');
+  assert.equal(Number(aw[0].amount), 4200, 'amount from the sent version, not invented');
+  assert.equal((await admin.query(`select count(*)::int n from jobs where opportunity_id = $1`, [o.id])).rows[0].n, 1);
+});
+
+await test('Commission: scenarios without an agreement; traceable owed amounts under an approved one; first job vs repeat; profit needs cost', async () => {
+  const { opp: oppId, invoice } = globalThis.__award;
+  // no agreement recorded: nothing is owed; a what-if rate gives labelled scenario lines
+  let r = await m.rpc('commission_report', { p: { from: '2026-01-01', to: '2027-12-31' } });
+  assert.equal(r.owed, 0); assert.equal(r.lines.length, 0); assert.match(r.note, /scenarios, not money owed/);
+  r = await m.rpc('commission_report', { p: { from: '2026-01-01', to: '2027-12-31', scenario_rate: 0.05, scenario_trigger: 'collected' } });
+  assert.ok(r.lines.length >= 2 && r.lines.every(l => l.status === 'scenario'));
+  assert.equal(r.scenario, Math.round((1000 * 0.05 - 40 * 0.05) * 100) / 100);
+  // an active agreement must name who approved it and when
+  await assert.rejects(m.rpc('save_commission_agreement', { p: { title: 'Example plan', status: 'active', effective_from: '2026-01-01', basis: 'revenue', trigger_event: 'collected', first_job_rate: 0.05, repeat_rate: 0.02 } }), /active_needs_approval/);
+  const ag = await m.rpc('save_commission_agreement', { p: { title: 'Example plan (test)', status: 'active', effective_from: '2026-01-01', basis: 'revenue', trigger_event: 'collected',
+    first_job_rate: 0.05, repeat_rate: 0.02, credited_roles: ['closed'], approved_by_name: 'Example Owner', approved_on: '2026-01-02' } });
+  r = await m.rpc('commission_report', { p: { from: '2026-01-01', to: '2027-12-31' } });
+  const lines = r.lines.filter(l => l.opportunity_id === oppId);
+  assert.equal(lines.length, 2);
+  assert.ok(lines.every(l => l.status === 'owed' && l.agreement_id === ag.id && l.record_type === 'payment' && l.repeat === false && l.rate === 0.05));
+  assert.equal(r.owed, 48, '5% of 960 collected (1000 received, 40 credited back)');
+  assert.equal(r.note, null);
+  // a salesperson cannot read someone else's commission
+  await a.fails('commission_report', { p: { user_id: M } }, /workspace_manager_only/);
+  // profit basis without a recorded job cost is flagged, not guessed
+  await m.rpc('save_commission_agreement', { p: { id: ag.id, title: 'Example plan (test)', status: 'ended', effective_from: '2026-01-01', effective_to: '2026-12-31', basis: 'revenue',
+    trigger_event: 'collected', first_job_rate: 0.05, repeat_rate: 0.02, credited_roles: ['closed'], approved_by_name: 'Example Owner', approved_on: '2026-01-02' } });
+  await m.rpc('save_commission_agreement', { p: { title: 'Example profit plan (test)', status: 'active', effective_from: '2027-01-01', basis: 'gross_profit',
+    profit_definition: 'Invoice minus recorded direct job cost (labor, equipment, disposal)', trigger_event: 'collected', first_job_rate: 0.1, repeat_rate: 0.05,
+    credited_roles: ['closed'], approved_by_name: 'Example Owner', approved_on: '2026-12-20' } });
+  r = await m.rpc('commission_report', { p: { from: '2027-01-01', to: '2027-12-31' } });
+  assert.ok(r.lines.filter(l => l.opportunity_id === oppId).every(l => l.status === 'needs_cost' && l.amount === null));
+  await m.rpc('update_job', { p_id: globalThis.__award.job, p: { direct_cost: 970 } });
+  r = await m.rpc('commission_report', { p: { from: '2027-01-01', to: '2027-12-31' } });
+  assert.equal(r.owed, Math.round((500 - 20) * 0.1 * 100) / 100, '10% of half the collected amount (cost is half the job)');
+});
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
