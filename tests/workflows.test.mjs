@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 // End-to-end database workflow tests. Each "user" is a separate Postgres connection running
 // as the `authenticated` role with that user's JWT claims, exactly how Supabase's API calls the database.
 // usage: node tests/workflows.test.mjs <database>
@@ -1036,6 +1037,135 @@ await test('Contacts: do-not-contact hides phone and email from task lists; gues
   assert.equal(row.contact.phone, null); assert.equal(row.contact.do_not_contact, true);
   assert.ok((await admin.query(`select 1 from activities where contact_id = $1 and body = 'Marked do not contact'`, [k.id])).rowCount);
   await a.rpc('complete_task', { p_id: t.id, p: { status: 'cancelled', outcome: 'Do not contact' } });
+});
+await test('Estimate request: units are explicit, missing details listed, company and contact matched, estimating task created, duplicates caught', async () => {
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/estimate_request_core.json', import.meta.url)));
+  await m.rpc('set_workspace', { p_id: (await m.rpc('my_workspaces')).items.find(w => w.is_default).id });
+  // a number without a unit, or in a unit the field does not allow, is refused (no silent inches-as-feet)
+  const noUnit = structuredClone(fx); noUnit.idempotency_key = 'x1'; noUnit.items[0].answers.core_diameter = 4;
+  await m.fails('submit_estimate_request', { p: noUnit }, /unit_required/);
+  const wrongUnit = structuredClone(fx); wrongUnit.idempotency_key = 'x2'; wrongUnit.items[0].answers.core_diameter = { value: 4, unit: 'ft' };
+  await m.fails('submit_estimate_request', { p: wrongUnit }, /bad_unit/);
+  const unknown = structuredClone(fx); unknown.idempotency_key = 'x3'; unknown.items[0].service = 'teleportation';
+  await m.fails('submit_estimate_request', { p: unknown }, /unknown_service/);
+  const r = await m.rpc('submit_estimate_request', { p: fx });
+  assert.equal(r.ok, true); assert.equal(r.duplicate, false); assert.match(r.ref, /^ER-\d+/);
+  assert.equal(r.status, 'missing_info');
+  assert.deepEqual(r.missing.map(x => x.field), ['attachments'], 'only the photos are missing');
+  const again = await m.rpc('submit_estimate_request', { p: fx });
+  assert.equal(again.duplicate, true); assert.equal(again.id, r.id, 'same idempotency key returns the first request');
+  const req = await m.rpc('get_estimate_request', { p_id: r.id });
+  assert.equal(req.is_fixture, true);
+  assert.match(req.disclaimer, /not an approved estimate/);
+  const core = req.items.find(x => x.service_key === 'core_drilling');
+  assert.deepEqual(core.normalized.core_diameter, { value: 4, unit: 'in', base_value: 4, base_unit: 'in' });
+  const saw = req.items.find(x => x.service_key === 'slab_sawing');
+  assert.equal(saw.normalized.cut_length.base_value, 720, '60 linear feet = 720 inches, kept beside the original 60 lf');
+  assert.equal(saw.normalized.cut_length.value, 60); assert.equal(saw.normalized.cut_length.unit, 'lf');
+  const co = (await admin.query(`select * from companies where id = $1`, [req.company_id])).rows[0];
+  assert.equal(co.name, 'Example Mechanical Contractors LLC');
+  const k = (await admin.query(`select * from contacts where id = $1`, [req.contact_id])).rows[0];
+  assert.equal(k.verification, 'unverified'); assert.equal(k.source, 'estimate_request');
+  const o = (await admin.query(`select * from opportunities where id = $1`, [req.opportunity_id])).rows[0];
+  assert.equal(o.kind, 'inbound_request'); assert.equal(o.owner_id, M, 'goes to the workspace manager'); assert.equal(o.stage, 'qualified');
+  const t = (await admin.query(`select * from tasks where id = $1`, [req.task_id])).rows[0];
+  assert.equal(t.kind, 'estimate'); assert.equal(t.status, 'open'); assert.match(t.notes, /Photos or drawings/);
+  // fixtures stay out of the normal list
+  assert.ok(!(await m.rpc('estimate_requests')).some(x => x.id === r.id));
+  assert.ok((await m.rpc('estimate_requests', { p: { include_fixtures: true } })).some(x => x.id === r.id));
+  // a second request from the same company and email reuses both
+  const fx2 = structuredClone(fx); fx2.idempotency_key = 'fixture-core-0002'; fx2.items = [fx.items[1]];
+  const r2 = await m.rpc('submit_estimate_request', { p: fx2 });
+  const req2 = await m.rpc('get_estimate_request', { p_id: r2.id });
+  assert.equal(req2.company_id, req.company_id); assert.equal(req2.contact_id, req.contact_id);
+  // another user cannot read it by id from a workspace they are not in
+  const priv = (await m.rpc('my_workspaces')).items.find(w => w.kind === 'personal');
+  await m.rpc('set_workspace', { p_id: priv.id });
+  const pr = structuredClone(fx); pr.idempotency_key = 'fixture-private-1';
+  const r3 = await m.rpc('submit_estimate_request', { p: pr });
+  await a.fails('get_estimate_request', { p_id: r3.id }, /not_found/);
+  await m.rpc('set_workspace', { p_id: (await m.rpc('my_workspaces')).items.find(w => w.is_default).id });
+  globalThis.__er = { id: r.id, opp: req.opportunity_id };
+});
+
+await test('Integration key: only the edge function can submit; bad keys, missing idempotency and floods are refused and logged', async () => {
+  const k = await m.rpc('create_integration', { p_name: 'Estimate app (test)' });
+  assert.match(k.key, /^erk_[0-9a-f]{48}$/);
+  const stored = (await admin.query(`select key_hash, key_hint from integrations where id = $1`, [k.id])).rows[0];
+  assert.notEqual(stored.key_hash, k.key, 'only a hash is stored');
+  await a.fails('intake_estimate_request', { p_key: k.key, p: {} }, /permission denied/);
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/estimate_request_core.json', import.meta.url)));
+  fx.idempotency_key = 'app-1';
+  assert.equal((await svc.rpc('intake_estimate_request', { p_key: 'erk_wrong', p: fx })).error, 'unauthorized');
+  const noIdem = structuredClone(fx); delete noIdem.idempotency_key;
+  assert.equal((await svc.rpc('intake_estimate_request', { p_key: k.key, p: noIdem })).error, 'idempotency_key_required');
+  const ok = await svc.rpc('intake_estimate_request', { p_key: k.key, p: fx });
+  assert.equal(ok.ok, true); assert.equal(ok.duplicate, false);
+  assert.deepEqual(Object.keys(ok).sort(), ['duplicate', 'missing', 'ok', 'ref', 'status'], 'the app learns nothing about other records');
+  assert.equal((await svc.rpc('intake_estimate_request', { p_key: k.key, p: fx })).duplicate, true);
+  const bad = structuredClone(fx); bad.idempotency_key = 'app-2'; bad.items[0].answers.core_depth = { value: 8, unit: 'yards' };
+  const rej = await svc.rpc('intake_estimate_request', { p_key: k.key, p: bad });
+  assert.equal(rej.error, 'invalid');
+  await admin.query(`update integrations set max_per_hour = 2 where id = $1`, [k.id]);
+  const flood = structuredClone(fx); flood.idempotency_key = 'app-3';
+  assert.equal((await svc.rpc('intake_estimate_request', { p_key: k.key, p: flood })).error, 'rate_limited');
+  const log = await m.rpc('list_integrations');
+  assert.deepEqual(log[0].recent.map(e => e.outcome).sort(), ['accepted', 'duplicate', 'rate_limited', 'rejected', 'rejected'].sort());
+  await m.rpc('set_integration_active', { p_id: k.id, p_active: false });
+  assert.equal((await svc.rpc('intake_estimate_request', { p_key: k.key, p: flood })).error, 'unauthorized');
+});
+
+await test('Quotes: lines keep the customer quantities flagged, unpriced lines block approval, sent versions are frozen, new versions keep history', async () => {
+  const { id: erId, opp } = globalThis.__er;
+  const q = await m.rpc('create_quote', { p_opportunity: opp, p: { estimate_request_id: erId } });
+  const v1 = q.versions[0];
+  assert.equal(v1.status, 'draft');
+  assert.deepEqual(v1.lines.map(l => [l.qty, l.unit, l.qty_source, l.rate_source]), [[12, 'ea', 'contractor', 'manual'], [60, 'lf', 'contractor', 'manual']]);
+  assert.ok(v1.flags.some(f => /customer's quantities/.test(f.text)));
+  await m.fails('approve_quote_version', { p_version: v1.id }, /unpriced_lines/);
+  // a pricing rule needs approval before it can price a line; salespeople can propose but not approve
+  let rules = await a.rpc('save_pricing_rule', { p: { service_key: 'core_drilling', description: 'Core 2-6 in dia up to 12 in deep (EXAMPLE RATE)', unit: 'ea', rate: 85 } });
+  const rule = rules.find(r => r.service_key === 'core_drilling');
+  await a.fails('save_pricing_rule', { p: { id: rule.id, status: 'approved' } }, /workspace_manager_only/);
+  await m.fails('save_quote_line', { p_version: v1.id, p: { id: v1.lines[0].id, pricing_rule_id: rule.id, unit: 'ea' } }, /rule_not_approved/);
+  rules = await m.rpc('save_pricing_rule', { p: { id: rule.id, status: 'approved' } });
+  await m.fails('save_quote_line', { p_version: v1.id, p: { id: v1.lines[0].id, pricing_rule_id: rule.id, unit: 'lf' } }, /unit_mismatch/);
+  await m.rpc('save_quote_line', { p_version: v1.id, p: { id: v1.lines[0].id, pricing_rule_id: rule.id, unit: 'ea' } });
+  await m.rpc('save_quote_line', { p_version: v1.id, p: { id: v1.lines[1].id, rate: 9.5, unit: 'lf' } });
+  await m.rpc('save_quote_line', { p_version: v1.id, p: { kind: 'mobilization', description: 'Mobilization', qty: 1, unit: 'ls', rate: 350, qty_source: 'verified' } });
+  let cur = await m.rpc('update_quote_version', { p_version: v1.id, p: { assumptions: ['Customer marks core locations', 'Water available on floor'], exclusions: ['Patching', 'Firestopping'] } });
+  let v = cur.versions[0];
+  assert.equal(v.total, 12 * 85 + 60 * 9.5 + 350, 'total reconciles with the lines');
+  await m.fails('mark_quote_sent', { p_version: v.id, p: { sent_to: 'sam@example.com' } }, /approve_first/);
+  await m.rpc('approve_quote_version', { p_version: v.id });
+  await m.fails('save_quote_line', { p_version: v.id, p: { id: v.lines[0].id, rate: 1, unit: 'ea' } }, /version_frozen/);
+  await m.fails('mark_quote_sent', { p_version: v.id, p: {} }, /sent_to_required/);
+  cur = await m.rpc('mark_quote_sent', { p_version: v.id, p: { sent_to: 'Sam Example <sam@example.com>', sent_method: 'email' } });
+  const o = (await admin.query(`select stage, quote_amount, quote_status from opportunities where id = $1`, [opp])).rows[0];
+  assert.equal(o.stage, 'quote_sent'); assert.equal(Number(o.quote_amount), 1940); assert.equal(o.quote_status, 'sent');
+  assert.equal((await admin.query(`select status from estimate_requests where id = $1`, [erId])).rows[0].status, 'quoted');
+  // a revision is a new version; version 1 stays exactly as sent
+  cur = await m.rpc('new_quote_version', { p_from: v.id });
+  const v2 = cur.versions[0];
+  assert.equal(v2.version_no, 2); assert.equal(v2.status, 'draft'); assert.equal(v2.lines.length, 3);
+  await m.rpc('save_quote_line', { p_version: v2.id, p: { id: v2.lines[1].id, qty: 75, unit: 'lf', qty_source: 'measured', rate: 9.5 } });
+  cur = await m.rpc('get_quote', { p_id: cur.id });
+  assert.equal(cur.versions.find(x => x.version_no === 1).total, 1940, 'version 1 unchanged');
+  assert.equal(cur.versions.find(x => x.version_no === 2).total, 12 * 85 + 75 * 9.5 + 350);
+  // extra scope after sending is a change request, not a silent edit
+  cur = await m.rpc('record_change_request', { p_quote: cur.id, p: { description: 'Add 4 cores on level 3', requested_by: 'Sam Example' } });
+  assert.equal(cur.change_requests.length, 1);
+  await a.fails('get_quote', { p_id: cur.id }, /not_owner/);   // teammate in the same workspace: quote details stay with the owner and managers
+  globalThis.__q = { quote: cur.id, v1: v.id, opp };
+});
+
+await test('Quote sent needs a quote: the quick amount path records a version; no amount, no move', async () => {
+  const o = await opp(`stage = 'available' and not needs_review and workspace_id = (select id from workspaces where is_default)`);
+  await b.rpc('claim_opportunity', { p_id: o.id });
+  await b.fails('log_activity', { p_id: o.id, p: { kind: 'note', body: 'sent', stage: 'quote_sent' } }, /quote_version_required/);
+  await b.rpc('log_activity', { p_id: o.id, p: { kind: 'quote', body: 'Sent by email', stage: 'quote_sent', quote_amount: 4200 } });
+  const v = (await admin.query(`select v.* from quote_versions v join quotes q on q.id = v.quote_id where q.opportunity_id = $1`, [o.id])).rows;
+  assert.equal(v.length, 1); assert.equal(v[0].status, 'sent'); assert.equal(Number(v[0].quick_amount), 4200);
 });
 for (const s of [m, a, b, x, anon, svc, admin]) await s.end();
 const failed = results.filter(r => r[0] === 'FAIL');

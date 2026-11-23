@@ -1,0 +1,17 @@
+{
+  "_note": "FIXTURE: example data for testing the estimate request integration. Not a real customer or job.",
+  "idempotency_key": "fixture-core-0001",
+  "is_fixture": true,
+  "company": { "name": "Example Mechanical Contractors LLC" },
+  "contact": { "name": "Sam Example", "title": "Project manager", "phone": "(407) 555-0110", "email": "sam@example.com" },
+  "job": { "address": "100 Example Parkway", "city": "Orlando", "county": "Orange", "requested_date": "2026-12-14",
+           "site_contact": { "name": "Lee Super", "phone": "(407) 555-0111" } },
+  "conditions": { "working_hours": "nights", "access": "Second floor, freight elevator", "power": "yes", "water": "unknown", "removal": "yes",
+                  "disposal": "Cores stay on site in their bin" },
+  "items": [
+    { "service": "core_drilling", "answers": { "core_count": { "value": 12, "unit": "ea" }, "core_diameter": { "value": 4, "unit": "in" },
+      "core_depth": { "value": 8, "unit": "in" }, "orientation": "floor_down" }, "notes": "Plumbing penetrations" },
+    { "service": "slab_sawing", "answers": { "cut_length": { "value": 60, "unit": "lf" }, "thickness": { "value": 6, "unit": "in" }, "reinforcement": "unknown" } }
+  ],
+  "attachments": []
+}
